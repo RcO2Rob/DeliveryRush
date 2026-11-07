@@ -9,7 +9,7 @@ public class DeliveryRush : ModuleRules
         PublicDependencyModuleNames.AddRange(new string[] {
             "Core", "CoreUObject", "Engine", "InputCore", "ProceduralMeshComponent"
         });
-        PrivateDependencyModuleNames.AddRange(new string[] { "RHI", "SlateCore" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "AnimationCore", "RHI", "SlateCore" });
         if (Target.bBuildEditor)
             PrivateDependencyModuleNames.AddRange(new string[] { "MeshDescription", "StaticMeshDescription", "AssetRegistry" });
     }

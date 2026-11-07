@@ -35,6 +35,17 @@ bool BoxContact(Vec2 a,Vec2 af,double ax,double ay,Vec2 b,Vec2 bf,double bx,doub
     return true;
 }
 }
+WalkPose PedestrianWalk::Sample(double trafficTime) const
+{
+    const Vec2 leg=route.end-route.start;
+    const double length=Length(leg);
+    if(length<1e-8) return {route.start,0,0};
+    const double distance=startProgress*length+trafficTime*speed;
+    const double cycle=std::fmod(distance,2*length);
+    const bool returning=cycle>=length;
+    return {route.start+leg*((returning?2*length-cycle:cycle)/length),
+        std::atan2(leg.y,leg.x)+(returning?Pi:0),distance};
+}
 Vec2 Simulation::Forward(double angle) { return {std::cos(angle),std::sin(angle)}; }
 Simulation::Simulation() : Simulation(std::random_device{}()) {}
 Simulation::Simulation(unsigned trafficSeed) : layout(DefaultLevelLayout())
@@ -45,6 +56,7 @@ Simulation::Simulation(unsigned trafficSeed) : layout(DefaultLevelLayout())
 }
 void Simulation::SetLayout(std::shared_ptr<const LevelLayout> level)
 {
+    pedestrians.clear();
     campaignLayout.reset();
     money=0; deliveriesCompleted=0;
     stage=CampaignStage::CityRush;
@@ -57,6 +69,16 @@ void Simulation::BeginCampaign(std::shared_ptr<const LevelLayout> level)
     campaignLayout=level?std::move(level):DefaultLevelLayout();
     LoadStage(CampaignStage::Tutorial);
 }
+void Simulation::BeginPark(std::shared_ptr<const LevelLayout> level,int carriedMoney)
+{
+    campaignLayout.reset();
+    pedestrians.clear();
+    layout=std::move(level);
+    stage=CampaignStage::ParkCrossing;
+    money=carriedMoney;
+    deliveriesCompleted=0;
+    Reset();
+}
 void Simulation::AdvanceStage()
 {
     if(!campaignLayout||phase!=Phase::Delivered) return;
@@ -65,10 +87,12 @@ void Simulation::AdvanceStage()
         case CampaignStage::Tutorial: LoadStage(CampaignStage::FirstChase); break;
         case CampaignStage::FirstChase: LoadStage(CampaignStage::CityRush); break;
         case CampaignStage::CityRush: LoadStage(CampaignStage::Tutorial); break;
+        case CampaignStage::ParkCrossing: break;
     }
 }
 void Simulation::LoadStage(CampaignStage nextStage)
 {
+    pedestrians.clear();
     stage=nextStage;
     if(stage==CampaignStage::Tutorial) money=0;
     deliveriesCompleted=0;
@@ -82,6 +106,7 @@ void Simulation::LoadStage(CampaignStage nextStage)
         };
         if(stage==CampaignStage::Tutorial)
         {
+            route->timeLimit=60;
             for(double distance:{75.,60.,45.,30.,15.})
             {
                 const Vec2 target=route->start+forward*distance;
@@ -129,7 +154,8 @@ void Simulation::LoadStage(CampaignStage nextStage)
 }
 TrafficRules Simulation::Traffic() const
 {
-    if(stage==CampaignStage::Tutorial) return {};
+    if(stage==CampaignStage::Tutorial) return {8.5,0,0,1};
+    if(stage==CampaignStage::ParkCrossing) return {29.,4.5,24.,4};
     const int order=HasDeliverySequence()?std::clamp(deliveriesCompleted,0,DeliveryCount-1):0;
     if(stage==CampaignStage::FirstChase)
         return {OncomingSpeed+order,4.-.5*order,24.-2*order,4+order};
@@ -150,9 +176,12 @@ void Simulation::Reset()
     phase=Phase::Ready; bike=layout->start; heading=layout->startHeading; speed=0; time=layout->timeLimit;
     elapsed=travelled=steering=roll=rollVelocity=hitFlash=fallTimer=restartFlash=0;
     shove={}; falls=grazes=0; attempt=1;
+    pedestrianHits=0;
+    for(auto& pedestrian:pedestrians) pedestrian.touchingBike=false;
     trafficImpact={};
-    frontWavesEnabled=stage!=CampaignStage::Tutorial; wavesStarted=0;
-    nextFrontWaveAt=stage==CampaignStage::FirstChase?2.5:0;
+    frontWavesEnabled=true; wavesStarted=0;
+    bridgesCrossed=0;
+    nextFrontWaveAt=stage==CampaignStage::CityRush?0:2.5;
     travelAtLastWave=nextWaveCheckAt=0;
     pendingFrontWaveSize=0;
     for(std::size_t i=0;i<cars.size();++i)
@@ -164,16 +193,28 @@ void Simulation::Reset()
     timePickups={}; pickupsCollected=0; timePickupFlash=0;
     freezePickups={}; freezeRemaining=trafficElapsed=0; freezesCollected=0;
     deliveryFlash=0;
-    if(HasDeliverySequence()) PlaceOrderPickups();
+    if(stage==CampaignStage::Tutorial)
+    {
+        const Vec2 route=layout->goal-layout->start;
+        const Vec2 coin=layout->start+route*.23, snowflake=layout->start+route*.48;
+        if(!IsBlocked(coin,1.5)) timePickups[0]={coin,true};
+        if(Length(snowflake-coin)>4.2&&!IsBlocked(snowflake,1.5)) freezePickups[0]={snowflake,true};
+    }
+    else if(HasDeliverySequence()) PlaceOrderPickups();
 }
 void Simulation::CompleteDelivery()
 {
+    if(time<=0) { phase=Phase::Failed; return; }
+    if(stage==CampaignStage::ParkCrossing)
+    {
+        money+=DeliveryReward; phase=Phase::Delivered;
+        return;
+    }
     if(!HasDeliverySequence()||deliveriesCompleted==DeliveryCount)
     {
         phase=Phase::Delivered;
         return;
     }
-    if(time<=0) { phase=Phase::Failed; return; }
     ++deliveriesCompleted;
     money+=DeliveryReward;
     deliveryFlash=2.5;
@@ -305,9 +346,10 @@ void Simulation::CollectTimePickups()
         timePickupFlash=1.5;
     }
 }
-void Simulation::Start() { if(phase==Phase::Ready) { phase=Phase::Riding; speed=HasTimeLimit()?4:0; } }
+void Simulation::Start() { if(phase==Phase::Ready) { phase=Phase::Riding; speed=stage==CampaignStage::Tutorial?0:4; } }
 void Simulation::Restart()
 {
+    if(stage==CampaignStage::ParkCrossing&&phase==Phase::Delivered) return;
     const int savedFalls=falls, savedAttempt=attempt;
     Reset(); falls=savedFalls; attempt=savedAttempt+1; Start(); restartFlash=1;
 }
@@ -340,7 +382,7 @@ void Simulation::Tick(double dt,const Input& input)
 }
 void Simulation::Step(double dt,const Input& input)
 {
-    if(HasTimeLimit()) { dt=std::min(dt,time); time=std::max(0.0,time-dt); }
+    dt=std::min(dt,time+freezeRemaining);
     elapsed+=dt;
     const double previousFreeze=freezeRemaining;
     freezeRemaining=std::max(0.0,freezeRemaining-dt);
@@ -349,7 +391,7 @@ void Simulation::Step(double dt,const Input& input)
     deliveryFlash=std::max(0.0,deliveryFlash-dt);
     steering=std::clamp(input.steer,-1.0,1.0);
     if(input.brake) speed=Approach(speed,0,dt*14);
-    else if(input.throttle>.1) speed=std::min(HasTimeLimit()?BikeMaxSpeed:11.,speed+dt*BikeAcceleration);
+    else if(input.throttle>.1) speed=std::min(stage==CampaignStage::Tutorial?11.:BikeMaxSpeed,speed+dt*BikeAcceleration);
     else if(input.throttle<-.1) speed=std::max(-3.2,speed-dt*(speed>0?10.5:3));
     else speed=Approach(speed,0,dt*.8);
     heading=Wrap(heading+steering*SteeringResponse*(.65+std::min(std::abs(speed)/7,1.0))
@@ -357,17 +399,22 @@ void Simulation::Step(double dt,const Input& input)
     rollVelocity+=(-15*roll-6*rollVelocity)*dt;
     roll+=rollVelocity*dt;
     shove=shove*std::exp(-4*dt);
+    const Vec2 previousBike=bike;
     MoveBike(dt);
     CollectTimePickups();
     const int previousFreezes=freezesCollected;
     CollectFreezePickups();
     const double frozenStep=freezesCollected>previousFreezes?dt:std::min(dt,previousFreeze);
     const double trafficStep=dt-frozenStep;
+    time=std::max(0.0,time-trafficStep);
     trafficElapsed+=trafficStep;
+    ContactPedestrians(previousBike);
+    const double rise=layout->height(bike.x,bike.y)-layout->height(previousBike.x,previousBike.y);
+    const Vec2 travel=bike-previousBike;
+    travelled+=std::sqrt(Dot(travel,travel)+rise*rise);
     if(frozenStep>0)
     {
-        // Preserve scheduled entries and attack ages; thawing never catches up
-        // five seconds of movement or immediately expires a one-pass car.
+        // Preserve scheduled entries and attack ages so thawing never catches up the frozen interval.
         nextFrontWaveAt+=frozenStep; nextWaveCheckAt+=frozenStep;
         for(Car& car:cars)
         {
@@ -397,13 +444,16 @@ void Simulation::Step(double dt,const Input& input)
     }
     if(phase!=Phase::Riding) return;
     if(std::abs(roll)>.95) { Fall(roll); return; }
-    if(DistanceToGoal()<6) { CompleteDelivery(); return; }
-    if(HasTimeLimit()&&time<=0) phase=Phase::Failed;
+    if(HasPendingBridge())
+    {
+        if(DistanceToGoal()<3) ++bridgesCrossed;
+    }
+    else if(DistanceToGoal()<6) { CompleteDelivery(); return; }
+    if(time<=0) phase=Phase::Failed;
 }
 void Simulation::MoveBike(double dt)
 {
     const Vec2 old=bike;
-    const double oldHeight=layout->height(old.x,old.y);
     const double pitch=Pose(old,heading,.65,.25).pitch;
     bike=bike+(Forward(heading)*(speed*std::cos(pitch))+shove)*dt;
     for(const Building& b:layout->obstacles)
@@ -419,27 +469,67 @@ void Simulation::MoveBike(double dt)
     }
     bike.x=std::clamp(bike.x,-layout->limit+.7,layout->limit-.7);
     bike.y=std::clamp(bike.y,-layout->limit+.7,layout->limit-.7);
-    const double rise=layout->height(bike.x,bike.y)-oldHeight;
-    travelled+=std::sqrt(Dot(bike-old,bike-old)+rise*rise);
+}
+void Simulation::ContactPedestrians(Vec2 previousBike)
+{
+    constexpr double ContactRadius=.90;
+    const Vec2 forward=Forward(heading);
+    for(auto& pedestrian:pedestrians)
+    {
+        const Vec2 position=pedestrian.Sample(trafficElapsed).position;
+        const Vec2 offset=bike-position;
+        const double distance=Length(offset);
+        if(distance>=ContactRadius)
+        {
+            if(distance>ContactRadius+.15) pedestrian.touchingBike=false;
+            continue;
+        }
+        const Vec2 normal=distance>1e-8?offset*(1/distance):forward*(speed<0?1:-1);
+        const Vec2 separated=position+normal*(ContactRadius+.01);
+        const bool clear=std::abs(separated.x)<=layout->limit-.7&&std::abs(separated.y)<=layout->limit-.7&&
+            !layout->Blocked(separated,.58);
+        bike=clear?separated:previousBike;
+        if(Dot(forward*speed,normal)<0) speed*=.35;
+        if(!pedestrian.touchingBike)
+        {
+            ++pedestrianHits;
+            hitFlash=std::max(hitFlash,.20);
+            shove=shove+normal*.9;
+        }
+        pedestrian.touchingBike=true;
+    }
 }
 bool Simulation::InBuilding(Vec2 p,double radius) { return DefaultLevelLayout()->Blocked(p,radius); }
 bool Simulation::SegmentClear(Vec2 a,Vec2 b,double padding) { return DefaultLevelLayout()->Clear(a,b,padding); }
 bool Simulation::SpawnCar(Car& car)
 {
     const Vec2 forward=Forward(heading);
-    const bool onePass=stage==CampaignStage::FirstChase;
+    const bool lesson=stage==CampaignStage::Tutorial;
+    const bool onePass=stage==CampaignStage::FirstChase||lesson;
+    const bool park=stage==CampaignStage::ParkCrossing;
     Vec2 best; double bestScore=std::numeric_limits<double>::max();
     std::vector<Vec2> candidates;
     const auto consider=[&](Vec2 p)
     {
         const Vec2 offset=p-bike; const double d=Length(offset);
         double score;
-        if(onePass)
+        if(lesson)
+        {
+            if(d<12||IsBlocked(p,2.3)||!RouteClear(p,bike,1.5)) return;
+            score=0;
+        }
+        else if(onePass)
         {
             if(d<34||d>85||Dot(offset,forward)<d*std::cos(Pi/4)||IsBlocked(p,2.3)) return;
             const Vec2 exit=p-Normal(offset)*(d+20);
             if(std::abs(exit.x)>layout->limit-2.3||std::abs(exit.y)>layout->limit-2.3||!RouteClear(p,exit,1.5)) return;
             score=0;
+        }
+        else if(park)
+        {
+            if(d<28||d>70||IsBlocked(p,2.3)||!RouteClear(p,bike,2.2)) return;
+            const double side=car.formationIndex==0?1.:-1.;
+            score=std::abs(d-46)+(1-side*Dot(offset,forward)/d)*32;
         }
         else
         {
@@ -448,11 +538,12 @@ bool Simulation::SpawnCar(Car& car)
         }
         for(const Car& other:cars)
             if(other.phase!=CarPhase::Waiting&&Length(other.position-p)<10) return;
-        if(onePass) candidates.push_back(p);
+        if(onePass&&!lesson) candidates.push_back(p);
         else if(score<bestScore) { bestScore=score; best=p; }
     };
-    for(Vec2 point:layout->spawnPoints) consider(point);
-    if(onePass)
+    if(lesson) consider(layout->start+(layout->goal-layout->start)*.88);
+    else for(Vec2 point:layout->spawnPoints) consider(point);
+    if(onePass&&!lesson)
     {
         if(candidates.empty()) return false;
         best=candidates[std::uniform_int_distribution<std::size_t>(0,candidates.size()-1)(trafficRandom)];
@@ -461,15 +552,18 @@ bool Simulation::SpawnCar(Car& car)
     car.position=best;
     car.heading=std::atan2(bike.y-best.y,bike.x-best.x);
     if(onePass) car.attackHeading=car.heading;
-    car.speed=onePass?Traffic().speed:11; car.phase=CarPhase::Pursuing; car.navigationTimer=0;
+    car.speed=onePass?Traffic().speed:park?18:11; car.phase=CarPhase::Pursuing; car.navigationTimer=0;
     return true;
 }
 void Simulation::SpawnFrontWave()
 {
     if(!frontWavesEnabled) return;
-    const bool onePass=stage==CampaignStage::FirstChase;
+    const bool lesson=stage==CampaignStage::Tutorial;
+    if(lesson&&wavesStarted>0) return;
+    const bool onePass=stage==CampaignStage::FirstChase||lesson;
+    const bool park=stage==CampaignStage::ParkCrossing;
     const auto traffic=Traffic();
-    if(!onePass&&wavesStarted==0)
+    if(!onePass&&!park&&wavesStarted==0)
     {
         // Start the cadence when the first group actually enters the world.
         for(const Car& car:cars) if(car.wave==1&&car.phase==CarPhase::Pursuing)
@@ -479,22 +573,22 @@ void Simulation::SpawnFrontWave()
         }
         return;
     }
-    const double minTravel=onePass&&wavesStarted==0?12:traffic.waveTravel;
+    const double minTravel=lesson||(wavesStarted==0&&park)?0:onePass&&wavesStarted==0?12:traffic.waveTravel;
     if(elapsed<nextFrontWaveAt||elapsed<nextWaveCheckAt
         ||travelled-travelAtLastWave<minTravel) return;
-    if(onePass&&pendingFrontWaveSize==0) pendingFrontWaveSize=std::uniform_int_distribution<int>(2,3)(trafficRandom);
-    const std::size_t waveSize=onePass?std::size_t(pendingFrontWaveSize):std::size_t(FrontWaveSize);
+    if(onePass&&!lesson&&pendingFrontWaveSize==0) pendingFrontWaveSize=std::uniform_int_distribution<int>(2,3)(trafficRandom);
+    const std::size_t waveSize=park||lesson?1:onePass?std::size_t(pendingFrontWaveSize):std::size_t(FrontWaveSize);
     if(ActiveCars()+int(waveSize)>traffic.maxActiveCars) return;
     nextWaveCheckAt=elapsed+.25;
     std::array<std::size_t,3> slots{}; std::size_t found=0;
-    for(std::size_t i=onePass?0:InitialCarCount;i<cars.size()&&found<waveSize;++i)
+    for(std::size_t i=onePass||park?0:InitialCarCount;i<cars.size()&&found<waveSize;++i)
         if(cars[i].phase==CarPhase::Waiting&&cars[i].wave==0) slots[found++]=i;
     if(found!=waveSize) return;
     std::array<Car,3> saved{};
     for(std::size_t i=0;i<waveSize;++i) saved[i]=cars[slots[i]];
     for(std::size_t i=0;i<waveSize;++i)
     {
-        Car& car=cars[slots[i]]; car.wave=wavesStarted+1; car.formationIndex=int(i);
+        Car& car=cars[slots[i]]; car.wave=wavesStarted+1; car.formationIndex=park?wavesStarted%2:int(i);
         car.spawnAt=elapsed;
         if(!SpawnCar(car))
         {
@@ -547,7 +641,8 @@ Vec2 Simulation::NavigationTarget(const Car& car,Vec2 target) const
 }
 void Simulation::BeginRecovery(Car& car)
 {
-    if(stage==CampaignStage::FirstChase||car.phase!=CarPhase::Pursuing||car.attackMode==AttackMode::Recovering) return;
+    if(stage!=CampaignStage::CityRush||
+       car.phase!=CarPhase::Pursuing||car.attackMode==AttackMode::Recovering) return;
     car.attackMode=AttackMode::Recovering;
     car.reattackIn=3.4+.1*((car.identity-1)%3);
     car.recoveryAge=car.ramTime=0;
@@ -557,9 +652,14 @@ void Simulation::BeginRecovery(Car& car)
 void Simulation::MoveCar(Car& car,double dt)
 {
     car.contactCooldown=std::max(0.0,car.contactCooldown-dt);
-    if(stage==CampaignStage::FirstChase)
+    if(stage==CampaignStage::FirstChase||stage==CampaignStage::Tutorial)
     {
         MoveOncomingCar(car,dt);
+        return;
+    }
+    if(stage==CampaignStage::ParkCrossing)
+    {
+        MoveParkCar(car,dt);
         return;
     }
     car.navigationTimer-=dt;
@@ -666,6 +766,41 @@ void Simulation::MoveCar(Car& car,double dt)
     car.heading=Wrap(car.heading+turn);
     // Steering alone never wrecks a car. Real obstacle and vehicle impacts
     // below remain responsible for overturns, including during a fast turn.
+    MoveCarForward(car,dt);
+}
+void Simulation::MoveParkCar(Car& car,double dt)
+{
+    Vec2 target=bike+Forward(heading)*(std::max(0.0,speed)*.22);
+    if(!RouteClear(bike,target,1.3)) target=bike;
+    car.navigationTimer-=dt;
+    if(car.navigationTimer<=0)
+    {
+        car.waypoint=NavigationTarget(car,target);
+        car.navigationTimer=.14;
+    }
+    const Vec2 delta=car.waypoint-car.position;
+    const double distance=Length(delta);
+    const double angle=distance>.05?Wrap(std::atan2(delta.y,delta.x)-car.heading):0;
+    const double brake=25;
+    double targetSpeed=distance>.05?Traffic().speed:0;
+    if(std::abs(angle)>.30) targetSpeed=std::min(targetSpeed,5.5);
+    if(Length(car.waypoint-target)>3)
+        targetSpeed=std::min(targetSpeed,std::sqrt(100+2*brake*std::max(0.0,distance-5)));
+    const Vec2 forward=Forward(car.heading);
+    const double lookAhead=3+car.speed*car.speed/(2*brake);
+    if(!RouteClear(car.position,car.position+forward*lookAhead,1.25)) targetSpeed=std::min(targetSpeed,4.5);
+    for(const Car& other:cars)
+    {
+        if(&other==&car||other.phase==CarPhase::Waiting) continue;
+        const Vec2 offset=other.position-car.position;
+        const double ahead=Dot(offset,forward);
+        if(ahead>0&&ahead<lookAhead+3&&std::abs(Dot(offset,{-forward.y,forward.x}))<1.9&&
+            Dot(Forward(other.heading),forward)>.5)
+            targetSpeed=std::min(targetSpeed,std::max(0.0,other.speed+(ahead-5)*1.2));
+    }
+    car.speed=Approach(car.speed,targetSpeed,dt*(targetSpeed<car.speed?brake:10));
+    const double turnRate=car.speed>12?1.3:2.5;
+    car.heading=Wrap(car.heading+std::clamp(angle,-turnRate*dt,turnRate*dt));
     MoveCarForward(car,dt);
 }
 void Simulation::MoveOncomingCar(Car& car,double dt)
@@ -828,7 +963,8 @@ void Simulation::Contact(Car& car)
     speed*=.8;
     if(!frozen) { car.speed*=.82; BeginRecovery(car); }
 }
-double Simulation::DistanceToGoal() const { return Length(layout->goal-bike); }
+Vec2 Simulation::CurrentTarget() const { return HasPendingBridge()?layout->bridgeCheckpoints[bridgesCrossed]:layout->goal; }
+double Simulation::DistanceToGoal() const { return Length(CurrentTarget()-bike); }
 int Simulation::ActiveCars() const
 {
     int count=0; for(const Car& car:cars) if(car.phase==CarPhase::Pursuing) ++count;

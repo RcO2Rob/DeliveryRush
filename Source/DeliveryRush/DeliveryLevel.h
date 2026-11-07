@@ -60,6 +60,7 @@ public:
     void MergeDecoration(AStaticMeshActor* Prop,AStaticMeshActor* Decoration);
     UPROPERTY(EditAnywhere,Category="Delivery") TObjectPtr<AActor> StartActor;
     UPROPERTY(EditAnywhere,Category="Delivery") TObjectPtr<AActor> GoalActor;
+    UPROPERTY(EditAnywhere,Category="Delivery") TArray<TObjectPtr<AActor>> BridgeCheckpoints;
     UPROPERTY(EditAnywhere,Category="Delivery",meta=(ClampMin="10",Units="s")) double TimeLimit=100;
     UPROPERTY(EditAnywhere,Category="Delivery",meta=(ClampMin="1000",Units="cm")) double WorldHalfExtent=20800;
 };

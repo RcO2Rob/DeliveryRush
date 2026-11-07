@@ -7,7 +7,7 @@
 namespace Delivery
 {
 enum class Phase { Ready, Riding, Paused, Fallen, Delivered, Failed };
-enum class CampaignStage { Tutorial = 1, FirstChase, CityRush };
+enum class CampaignStage { Tutorial = 1, FirstChase, CityRush, ParkCrossing };
 enum class CarPhase { Waiting, Pursuing, Wrecked };
 enum class CrashCause { None, Building, Car };
 enum class AttackMode { Oncoming, Recovering, Catching, Ramming, Leaving };
@@ -27,6 +27,18 @@ struct TrafficRules
 {
     double speed = 0, waveInterval = 0, waveTravel = 0;
     int maxActiveCars = 0;
+};
+struct WalkPose
+{
+    Vec2 position;
+    double heading, distance;
+};
+struct PedestrianWalk
+{
+    WalkRoute route;
+    double speed=1.4, startProgress=0;
+    bool touchingBike=false;
+    WalkPose Sample(double trafficTime) const;
 };
 struct Car
 {
@@ -54,7 +66,7 @@ struct Simulation
     static constexpr double TimeLimit = DeliveryTime;
     static constexpr std::size_t TimePickupCount = 2;
     static constexpr std::size_t FreezePickupCount = 1;
-    static constexpr double FreezeDuration = 5;
+    static constexpr double FreezeDuration = 3;
     static constexpr int TimePickupBonus = 10;
     static constexpr double OncomingSpeed = 17;
     static constexpr double CityCruiseSpeed = 21;
@@ -66,11 +78,13 @@ struct Simulation
     double steering = 0, roll = 0, rollVelocity = 0, hitFlash = 0;
     double fallTimer = 0, fallDirection = 1, restartFlash = 0;
     int falls = 0, grazes = 0, attempt = 1;
+    int pedestrianHits = 0;
     TrafficImpact trafficImpact;
     bool frontWavesEnabled = true;
     int wavesStarted = 0;
     double nextFrontWaveAt = 0, travelAtLastWave = 0, nextWaveCheckAt = 0;
     std::array<Car, CarCount> cars;
+    std::vector<PedestrianWalk> pedestrians;
     std::array<TimePickup, TimePickupCount> timePickups;
     std::array<Pickup, FreezePickupCount> freezePickups;
     int pickupsCollected = 0;
@@ -78,6 +92,7 @@ struct Simulation
     double freezeRemaining = 0, trafficElapsed = 0;
     int freezesCollected = 0;
     int deliveriesCompleted = 0, money = 0;
+    std::size_t bridgesCrossed = 0;
     double deliveryFlash = 0;
 
     std::shared_ptr<const LevelLayout> layout;
@@ -85,10 +100,11 @@ struct Simulation
     explicit Simulation(unsigned trafficSeed);
     void SetLayout(std::shared_ptr<const LevelLayout> level);
     void BeginCampaign(std::shared_ptr<const LevelLayout> level);
+    void BeginPark(std::shared_ptr<const LevelLayout> level,int carriedMoney);
     void AdvanceStage();
     CampaignStage Stage() const { return stage; }
-    bool HasTimeLimit() const { return stage!=CampaignStage::Tutorial; }
     bool TrafficFrozen() const { return freezeRemaining>1e-8; }
+    bool HasPendingBridge() const { return stage==CampaignStage::ParkCrossing&&bridgesCrossed<layout->bridgeCheckpoints.size(); }
     bool HasDeliverySequence() const { return campaignLayout&&stage!=CampaignStage::Tutorial; }
     bool IsClinicDelivery() const
     { return stage==CampaignStage::CityRush&&(!HasDeliverySequence()||deliveriesCompleted>=DeliveryCount-1); }
@@ -104,6 +120,7 @@ struct Simulation
     void Tick(double dt, const Input& input);
     void Fall(double direction = 1);
     double DistanceToGoal() const;
+    Vec2 CurrentTarget() const;
     int ActiveCars() const;
     int WreckedCars() const;
     static bool SegmentClear(Vec2 a, Vec2 b, double padding = .6);
@@ -120,7 +137,9 @@ private:
     void CompleteDelivery();
     void Step(double dt, const Input& input);
     void MoveBike(double dt);
+    void ContactPedestrians(Vec2 previousBike);
     void MoveCar(Car& car, double dt);
+    void MoveParkCar(Car& car,double dt);
     void MoveOncomingCar(Car& car, double dt);
     void MoveCarForward(Car& car, double dt);
     void PlacePickups(Pickup* pickups,std::size_t capacity,bool freezing);

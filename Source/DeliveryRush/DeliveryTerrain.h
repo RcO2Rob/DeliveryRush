@@ -18,6 +18,7 @@ public:
     virtual void PreSave(FObjectPreSaveContext SaveContext) override;
 #endif
     UPROPERTY(EditAnywhere,Category="Delivery|Terrain") bool bUseLevelHills=false;
+    UPROPERTY(EditAnywhere,Category="Delivery|Terrain") bool bParkGround=false;
     UFUNCTION(BlueprintPure,Category="Delivery|Terrain") double SampleHeight(double X,double Y) const;
     UFUNCTION(BlueprintPure,Category="Delivery|Terrain")
     static double GetGroundHeight(double X,double Y);

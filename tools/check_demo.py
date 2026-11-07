@@ -62,9 +62,10 @@ def main():
     assert engine["/Script/EngineSettings.GameMapsSettings"]["GlobalDefaultGameMode"] == "/Script/DeliveryRush.DeliveryGameMode"
     maps = engine["/Script/EngineSettings.GameMapsSettings"]
     assert maps["GameDefaultMap"] == layout["map"] and maps["EditorStartupMap"] == layout["map"]
-    package = configparser.ConfigParser(strict=False)
-    package.read(ROOT / "Config/DefaultGame.ini", encoding="utf-8")
-    assert package["/Script/UnrealEd.ProjectPackagingSettings"]["+MapsToCook"] == '(FilePath="' + layout["map"] + '")'
+    packaged_maps = {line.strip() for line in (ROOT / "Config/DefaultGame.ini").read_text(encoding="utf-8").splitlines()
+                     if line.startswith("+MapsToCook=")}
+    assert '+MapsToCook=(FilePath="' + layout["map"] + '")' in packaged_maps
+    assert '+MapsToCook=(FilePath="/Game/Maps/DeliveryPark")' in packaged_maps
     marker = ROOT / "Content" / layout["marker"]
     if marker.is_file():
         assert json.loads(marker.read_text(encoding="utf-8"))["layout_sha256"] == hashlib.sha256((ROOT / "Design/city_layout.json").read_bytes()).hexdigest()

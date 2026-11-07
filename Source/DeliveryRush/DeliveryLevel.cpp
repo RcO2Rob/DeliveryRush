@@ -261,12 +261,28 @@ std::shared_ptr<const LevelLayout> ReadLevelLayout(UWorld* World)
     if(!Start) { TActorIterator<APlayerStart> It(World);if(It) Start=*It; }
     if(Start) { const FVector P=Start->GetActorLocation()/100;Level->start={P.X,P.Y};Level->startHeading=FMath::DegreesToRadians(Start->GetActorRotation().Yaw); }
     if(Settings->GoalActor) { const FVector P=Settings->GoalActor->GetActorLocation()/100;Level->goal={P.X,P.Y}; }
+    for(const AActor* Checkpoint:Settings->BridgeCheckpoints)
+    {
+        if(!Checkpoint) continue;
+        const FVector Position=Checkpoint->GetActorLocation()/100;
+        Level->bridgeCheckpoints.push_back({Position.X,Position.Y});
+    }
     FCollisionQueryParams Query(SCENE_QUERY_STAT(DeliveryLevelGround),true);
     if(Start) Query.AddIgnoredActor(Start);
     if(Settings->GoalActor) Query.AddIgnoredActor(Settings->GoalActor);
     for(TActorIterator<AActor> It(World);It;++It)
     {
         AActor* Actor=*It;
+        if(!Level->bridgeCheckpoints.empty()&&Actor->ActorHasTag(TEXT("DeliveryGround")))
+        {
+            // Bridge deck centers and straight approaches keep the visibility graph connected across the channels.
+            const FBox Bounds=Actor->GetComponentsBoundingBox();
+            const FVector Center=Bounds.GetCenter()/100;
+            const FVector Forward=Actor->GetActorForwardVector();
+            const double Reach=(FMath::Abs(Forward.X)*Bounds.GetExtent().X+FMath::Abs(Forward.Y)*Bounds.GetExtent().Y)/100+6;
+            for(double Offset:{-Reach,0.,Reach})
+                Level->nodes.push_back({Center.X+Forward.X*Offset,Center.Y+Forward.Y*Offset});
+        }
         if(Actor->ActorHasTag(TEXT("DeliveryGround"))||Actor->IsA<ADeliveryTerrain>()) continue;
         if(Actor->ActorHasTag(TEXT("DeliveryDecoration"))) { Query.AddIgnoredActor(Actor);continue; }
         TArray<UStaticMeshComponent*> Meshes;Actor->GetComponents(Meshes);
@@ -326,7 +342,7 @@ std::shared_ptr<const LevelLayout> ReadLevelLayout(UWorld* World)
     for(double X=-Level->limit+18;X<Level->limit;X+=40) for(double Y=-Level->limit+18;Y<Level->limit;Y+=40)
         Level->nodes.push_back({X,Y});
     if(Level->spawnPoints.empty()) Level->spawnPoints=Level->nodes;
-    Level->BuildNavigation();
+    Level->BuildNavigation(Level->bridgeCheckpoints.empty());
     UE_LOG(LogTemp,Display,TEXT("DELIVERY_LEVEL_LAYOUT: obstacles=%d nodes=%d roads=%d start=(%.1f,%.1f) goal=(%.1f,%.1f)"),
         int(Level->obstacles.size()),int(Level->nodes.size()),int(Level->paths.size()),Level->start.x,Level->start.y,Level->goal.x,Level->goal.y);
     return Level;

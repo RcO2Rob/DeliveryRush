@@ -9,6 +9,9 @@
 
 class USceneComponent;
 class UStaticMeshComponent;
+class UPoseableMeshComponent;
+class USkeletalMeshComponent;
+class UAnimSequence;
 class UCameraComponent;
 class USpringArmComponent;
 class APlayerController;
@@ -45,14 +48,11 @@ class DELIVERYRUSH_API ADeliveryPedestrian : public AActor
     GENERATED_BODY()
 public:
     ADeliveryPedestrian();
-    void SetWalk(const Delivery::WalkRoute& Walk,float Speed,float StartProgress,int32 Outfit);
-    void Present(double Elapsed,const Delivery::LevelLayout& Level);
+    void SetOutfit(int32 Outfit);
+    void Present(const Delivery::PedestrianWalk& Walk,double Elapsed,const Delivery::LevelLayout& Level);
 private:
-    UPROPERTY() UStaticMeshComponent* Shirt;
-    UPROPERTY() UStaticMeshComponent* Arms[2];
-    UPROPERTY() UStaticMeshComponent* Legs[2];
-    Delivery::WalkRoute Route;
-    double WalkSpeed=1.4, InitialDistance=0;
+    UPROPERTY() USkeletalMeshComponent* Mesh;
+    UPROPERTY() UAnimSequence* WalkAnimation;
 };
 
 UCLASS()
@@ -61,16 +61,25 @@ class DELIVERYRUSH_API ADeliveryBike : public APawn
     GENERATED_BODY()
 public:
     ADeliveryBike();
-    void Present(const Delivery::Simulation& State, float DeltaSeconds);
+    void Present(const Delivery::Simulation& State, float DeltaSeconds, bool bPedaling = false);
     void Look(float X, float Y, bool Held, float Dt);
 private:
     UPROPERTY() USceneComponent* Body;
+    UPROPERTY() USceneComponent* Steering;
     UPROPERTY() USceneComponent* FrontWheel;
     UPROPERTY() USceneComponent* RearWheel;
-    UPROPERTY() UStaticMeshComponent* Legs[4];
+    UPROPERTY() UStaticMeshComponent* CrankArms[2];
+    UPROPERTY() UStaticMeshComponent* Pedals[2];
+    UPROPERTY() UPoseableMeshComponent* Courier;
+    UPROPERTY() UStaticMeshComponent* Helmet;
     UPROPERTY() USpringArmComponent* CameraArm;
     UPROPERTY() UCameraComponent* Camera;
-    float WheelAngle = 0, OrbitYaw = 0, OrbitPitch = -18;
+    void PresentCourier(const FVector (&PedalPositions)[2]);
+    TArray<FTransform> SeatedPose;
+    FIntVector Legs[2];
+    FIntVector Arms[2];
+    int32 HipsBone = INDEX_NONE, NeckBone = INDEX_NONE;
+    float WheelAngle = 0, PedalAngle = 0, OrbitYaw = 0, OrbitPitch = -18;
 };
 
 UCLASS()
@@ -84,10 +93,13 @@ public:
 private:
     UPROPERTY() USceneComponent* Body;
     UPROPERTY() UStaticMeshComponent* Chassis;
-    UPROPERTY() UStaticMeshComponent* Roof;
+    UPROPERTY() UStaticMeshComponent* Wheels[4];
     UPROPERTY() UAudioComponent* EngineAudio;
     UPROPERTY() UAudioComponent* BrakeAudio;
-    int PaintedIdentity = 0;
+    int PaintedIdentity = INDEX_NONE;
+    Delivery::Vec2 PreviousPosition;
+    double PreviousHeading = 0, WheelAngle = 0, FrontSteer = 0;
+    bool bHasPreviousPose = false;
     float PreviousAudioSpeed = 0.f;
     float BrakeCooldown = 0.f;
 };

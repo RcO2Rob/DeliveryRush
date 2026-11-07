@@ -440,14 +440,25 @@ int main()
     const auto city=DefaultLevelLayout();
     campaign.BeginCampaign(city);
     campaign.AdvanceStage();
+    Require(campaign.Stage()==CampaignStage::Tutorial&&campaign.phase==Phase::Ready&&campaign.time==60&&campaign.ActiveCars()==0,
+        "The lesson waits for the player to start before its one-minute countdown and traffic");
+    Require(campaign.timePickups[0].available&&!campaign.timePickups[1].available&&campaign.freezePickups[0].available,
+        "The teaching route shows one time coin and one snowflake");
+    auto lateLesson=campaign;
+    NoSpawn(lateLesson);lateLesson.Start();
+    Run(lateLesson,61,{0,0,true});
+    Require(lateLesson.phase==Phase::Failed,"The teaching delivery has a working deadline");
     campaign.Start();
-    Run(campaign,110,{0,0,true});
-    Require(campaign.Stage()==CampaignStage::Tutorial&&campaign.phase==Phase::Riding&&campaign.ActiveCars()==0,
-        "A new campaign starts with an untimed, traffic-free lesson");
-    Require(std::none_of(campaign.freezePickups.begin(),campaign.freezePickups.end(),
-        [](const Pickup& pickup){ return pickup.available; }),"The tutorial has no traffic freeze pickups");
-    Run(campaign,12,{1,0,false});
-    Require(campaign.phase==Phase::Delivered,"A new rider can finish the lesson by following the first street");
+    while(campaign.phase==Phase::Riding&&!campaign.TrafficFrozen()&&campaign.elapsed<8)
+        campaign.Tick(1./120,{1,0,false});
+    Require(campaign.pickupsCollected==1&&campaign.time>60&&campaign.freezesCollected==1&&campaign.TrafficFrozen()&&
+        campaign.ActiveCars()==1&&campaign.wavesStarted==1&&campaign.cars[0].speed==8.5,
+        "Pedaling along the teaching street collects both pickups and freezes one slow car");
+    Run(campaign,.28,{1,1,false});
+    Run(campaign,.4,{1,0,false});
+    Run(campaign,.28,{1,-1,false});
+    Run(campaign,8,{1,0,false});
+    Require(campaign.phase==Phase::Delivered,"A new rider can steer around the practice car and finish the lesson");
     campaign.AdvanceStage();
     Require(campaign.Stage()==CampaignStage::FirstChase&&campaign.phase==Phase::Ready&&campaign.time==60,
         "Finishing the lesson unlocks the timed first chase");
@@ -495,11 +506,11 @@ int main()
         frozenRide.Tick(1./120,{0,0,true});
         Require(!frozenRide.freezePickups[0].available&&frozenRide.freezesCollected==1&&
             frozenRide.freezeRemaining==Simulation::FreezeDuration&&Distance(parkedAt,frozenCar.position)==0,
-            "Collecting a snowflake freezes a moving car immediately for five seconds");
+            "Collecting a snowflake freezes a moving car immediately for three seconds");
         const double beforeFreezeTime=frozenRide.time, beforeTraffic=frozenRide.trafficElapsed;
         Run(frozenRide,1,{1,0,false},1./20);
-        Require(frozenRide.bike.x> -137.1&&std::abs(frozenRide.time-(beforeFreezeTime-1))<1e-8,
-            "Freezing traffic leaves cycling and the delivery clock running");
+        Require(frozenRide.bike.x> -137.1&&frozenRide.time==beforeFreezeTime,
+            "The player can keep cycling while the delivery clock is frozen");
         const double beforePause=frozenRide.freezeRemaining;
         frozenRide.TogglePause();Run(frozenRide,2);frozenRide.TogglePause();
         Require(frozenRide.freezeRemaining==beforePause,"Pausing the game also pauses the freeze countdown");
@@ -510,22 +521,22 @@ int main()
             "The next order places one new snowflake without cancelling an active freeze");
         refreshed.bike=refreshed.freezePickups[0].position;
         refreshed.Tick(1./120,{0,0,true});
-        Require(refreshed.freezesCollected==2&&refreshed.freezeRemaining==5,
-            "Another snowflake refreshes the freeze to five seconds without stacking");
+        Require(refreshed.freezesCollected==2&&refreshed.freezeRemaining==Simulation::FreezeDuration,
+            "Another snowflake refreshes the freeze to three seconds without stacking");
         refreshed.Restart();
         Require(!refreshed.TrafficFrozen()&&refreshed.freezesCollected==0&&refreshed.trafficElapsed==0&&
             refreshed.freezePickups[0].available,"Retrying clears the effect and places new snowflakes");
-        Run(frozenRide,3.99,{0,0,true},1./20);
+        Run(frozenRide,1.99,{0,0,true},1./20);
         Require(frozenRide.TrafficFrozen()&&frozenRide.wavesStarted==0&&frozenRide.ActiveCars()==1&&
             frozenRide.trafficElapsed==beforeTraffic&&Distance(parkedAt,frozenCar.position)==0&&frozenCar.speed==17,
             "Frozen traffic holds position, speed and pedestrian time and spawns no new waves");
         Run(frozenRide,.01,{0,0,true});
         Require(!frozenRide.TrafficFrozen()&&Distance(parkedAt,frozenCar.position)<1e-8,
-            "Traffic stays in place until the full five-second freeze ends");
+            "Traffic stays in place until the full three-second freeze ends");
         Run(frozenRide,.1,{0,0,true});
         Require(Distance(parkedAt,frozenCar.position)>1&&Distance(parkedAt,frozenCar.position)<2&&
-            frozenRide.trafficElapsed>beforeTraffic+.09,
-            "Traffic resumes at its old position without catching up the frozen time");
+            frozenRide.trafficElapsed>beforeTraffic+.09&&std::abs(frozenRide.time-(beforeFreezeTime-.1))<1e-8,
+            "Traffic and the timer resume without catching up the frozen time");
     }
     {
         auto iceBump=campaign;

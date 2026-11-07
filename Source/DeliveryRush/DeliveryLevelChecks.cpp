@@ -2,6 +2,9 @@
 #include "DeliveryLevel.h"
 #include "DeliveryTerrain.h"
 #include "DeliveryActors.h"
+#include "Animation/AnimSingleNodeInstance.h"
+#include "Components/PoseableMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/SplineComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
@@ -13,6 +16,55 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include <algorithm>
 #include <cmath>
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDeliveryCourierPoseCheck,"DeliveryRush.Editor.CourierPose",
+    EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FDeliveryCourierPoseCheck::RunTest(const FString& Parameters)
+{
+    UWorld* World=GWorld;
+    if(!TestNotNull(TEXT("A loaded world is required"),World)) return false;
+    ADeliveryBike* Bike=World->SpawnActor<ADeliveryBike>();
+    if(!TestNotNull(TEXT("The bicycle spawns"),Bike)) return false;
+    auto* Courier=Bike->FindComponentByClass<UPoseableMeshComponent>();
+    auto* Steering=FindObject<USceneComponent>(Bike,TEXT("Steering"));
+    auto* LeftPedal=FindObject<USceneComponent>(Bike,TEXT("LeftPedal"));
+    auto* RightPedal=FindObject<USceneComponent>(Bike,TEXT("RightPedal"));
+    auto* RearWheel=FindObject<USceneComponent>(Bike,TEXT("RearWheel"));
+    if(TestTrue(TEXT("The courier, steering and pedals are present"),Courier && Courier->GetSkinnedAsset() &&
+        Steering && LeftPedal && RightPedal && RearWheel))
+    {
+        Delivery::Simulation Ride;
+        Ride.Start();
+        Ride.speed=10;
+        Bike->Present(Ride,0);
+        const FVector StartPedal=LeftPedal->GetRelativeLocation();
+        Bike->Present(Ride,.05f,true);
+        TestTrue(TEXT("The forward pedal moves down on the power stroke"),LeftPedal->GetRelativeLocation().Z<StartPedal.Z);
+        bool FeetFollow=true, HandsFollow=true;
+        for(int32 Step=0; Step<24; ++Step)
+        {
+            Ride.steering=Step<12?-1:1;
+            Bike->Present(Ride,.04f,true);
+            FeetFollow &= Courier->GetBoneTransform(TEXT("Foot_L")).GetLocation().Equals(
+                LeftPedal->GetAttachParent()->GetComponentTransform().TransformPosition(LeftPedal->GetRelativeLocation()+FVector(-10,0,4)),.2);
+            FeetFollow &= Courier->GetBoneTransform(TEXT("Foot_R")).GetLocation().Equals(
+                RightPedal->GetAttachParent()->GetComponentTransform().TransformPosition(RightPedal->GetRelativeLocation()+FVector(-10,0,4)),.2);
+            HandsFollow &= Courier->GetBoneTransform(TEXT("Wrist_L")).GetLocation().Equals(
+                Steering->GetComponentTransform().TransformPosition(FVector(-16,-27,25.5)),.2);
+            HandsFollow &= Courier->GetBoneTransform(TEXT("Wrist_R")).GetLocation().Equals(
+                Steering->GetComponentTransform().TransformPosition(FVector(-16,27,25.5)),.2);
+        }
+        TestTrue(TEXT("Both feet track the pedals through a full rotation"),FeetFollow);
+        TestTrue(TEXT("Both hands track the handlebars in left and right turns"),HandsFollow);
+        const FVector CoastingPedal=LeftPedal->GetRelativeLocation();
+        const FRotator RollingWheel=RearWheel->GetRelativeRotation();
+        Bike->Present(Ride,.1f);
+        TestTrue(TEXT("The wheels continue rolling while the rider coasts"),
+            CoastingPedal.Equals(LeftPedal->GetRelativeLocation()) && !RollingWheel.Equals(RearWheel->GetRelativeRotation()));
+    }
+    Bike->Destroy();
+    return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDeliveryLevelEditCheck,"DeliveryRush.Editor.LevelEdits",
     EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
@@ -26,6 +78,84 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
     TActorIterator<ADeliveryRoad> RoadIt(World);
     if(!TestTrue(TEXT("Editable map has settings, terrain, hills and spline roads"),bool(SettingsIt)&&bool(TerrainIt)&&bool(HillIt)&&bool(RoadIt))) return false;
     auto* Settings=*SettingsIt;auto* Terrain=*TerrainIt;auto* Hill=*HillIt;auto* Road=*RoadIt;
+    if(Settings->BridgeCheckpoints.Num()>0)
+    {
+        const auto Park=Delivery::ReadLevelLayout(World);
+        if(!TestEqual(TEXT("The park has two ordered bridge checkpoints"),int32(Park->bridgeCheckpoints.size()),2)) return false;
+        TestTrue(TEXT("The separate park is about half the city map's area"),Park->limit==148&&Terrain->bParkGround);
+        TestTrue(TEXT("The park trail includes a substantial rise"),Terrain->SampleHeight(99,56)>8);
+        Delivery::Simulation Ride;
+        Ride.BeginPark(Park,600);
+        TestTrue(TEXT("The fourth stage loads one minute and carries the campaign cash"),
+            Ride.Stage()==Delivery::CampaignStage::ParkCrossing&&Ride.time==60&&Ride.money==600);
+        auto Traffic=Ride;
+        Traffic.Start();
+        Traffic.Tick(2.55,{0,0,true});
+        TestTrue(TEXT("A park enemy enters shortly after the rider starts"),Traffic.wavesStarted==1&&Traffic.ActiveCars()==1);
+        double PeakSpeed=0;
+        for(int32 Step=0;Step<30&&Traffic.phase==Delivery::Phase::Riding;++Step)
+        {
+            Traffic.Tick(.05,{0,0,true});
+            PeakSpeed=FMath::Max(PeakSpeed,Traffic.cars[0].speed);
+        }
+        TestTrue(TEXT("The live park enemy cruises faster than the last city order"),PeakSpeed>26);
+        Ride.frontWavesEnabled=false;
+        Ride.Start();
+        Ride.bike=Park->goal;
+        Ride.Tick(.01,{0,0,true});
+        TestTrue(TEXT("The drop cannot finish before both bridges"),Ride.phase==Delivery::Phase::Riding&&Ride.bridgesCrossed==0);
+        Ride.bike=Park->bridgeCheckpoints[1];
+        Ride.Tick(.01,{0,0,true});
+        TestEqual(TEXT("The second bridge cannot be counted first"),int32(Ride.bridgesCrossed),0);
+        TArray<FBox> BridgeDecks;
+        for(TActorIterator<AStaticMeshActor> Deck(World);Deck;++Deck)
+            if(Deck->ActorHasTag(TEXT("DeliveryGround"))) BridgeDecks.Add(Deck->GetComponentsBoundingBox());
+        if(!TestEqual(TEXT("The park has two physical bridge decks"),BridgeDecks.Num(),2)) return false;
+        BridgeDecks.Sort([](const FBox& A,const FBox& B){return A.GetCenter().X<B.GetCenter().X;});
+        for(int32 Index=0;Index<2;++Index)
+        {
+            const auto Gate=Park->bridgeCheckpoints[Index];
+            const auto& Deck=BridgeDecks[Index];
+            const auto Center=Deck.GetCenter()/100;
+            const Delivery::Vec2 Span{Center.X,Center.Y};
+            TestTrue(TEXT("The green checkpoint is on land beyond the bridge deck"),
+                Gate.x>Deck.Max.X/100+5&&!Park->Blocked(Gate,1.0)&&
+                FMath::Abs(Park->height(Gate.x,Gate.y)-Terrain->SampleHeight(Gate.x,Gate.y))<.05);
+            TestTrue(TEXT("The bridge deck is a rideable surface above the channel"),
+                Park->height(Span.x,Span.y)>Terrain->SampleHeight(Span.x,Span.y)+3);
+            TestTrue(TEXT("The deck center is clear and the water on both sides is blocked"),
+                Park->Clear({Span.x-15,Span.y},{Span.x+14,Span.y},.58)&&
+                Park->Blocked({Span.x,Span.y+8})&&Park->Blocked({Span.x,Span.y-8}));
+            auto Pursuit=Ride;
+            Pursuit.bike=Span+Delivery::Vec2{42,16};
+            Pursuit.speed=0;
+            auto& Car=Pursuit.cars[0];
+            Car.phase=Delivery::CarPhase::Pursuing;
+            Car.position=Span-Delivery::Vec2{20,0};
+            Car.heading=0;
+            Car.speed=18;
+            TestFalse(TEXT("The park pursuit must navigate around the river barrier"),Park->Clear(Car.position,Pursuit.bike,2.2));
+            for(int32 Step=0;Step<200&&Car.phase==Delivery::CarPhase::Pursuing&&Car.position.x<Span.x+15;++Step)
+                Pursuit.Tick(.05,{0,0,true});
+            TestTrue(FString::Printf(TEXT("An active pursuer crosses bridge %d and reaches the far bank"),Index+1),
+                Car.phase==Delivery::CarPhase::Pursuing&&Car.position.x>=Span.x+15);
+            Ride.bike=Span-Delivery::Vec2{15,0}; Ride.heading=0; Ride.speed=8;
+            for(int32 Step=0;Step<80&&Ride.bike.x<Span.x+14;++Step) Ride.Tick(.05,{1,0,false});
+            TestTrue(TEXT("Crossing the deck leaves its checkpoint pending until the rider reaches land"),
+                Ride.bike.x>=Span.x+14&&int32(Ride.bridgesCrossed)==Index);
+            const auto ToGate=Gate-Ride.bike;
+            Ride.heading=std::atan2(ToGate.y,ToGate.x); Ride.speed=8;
+            for(int32 Step=0;Step<80&&int32(Ride.bridgesCrossed)==Index;++Step) Ride.Tick(.05,{1,0,false});
+            TestEqual(TEXT("Reaching the green checkpoint on the far bank records the crossing"),int32(Ride.bridgesCrossed),Index+1);
+        }
+        Ride.bike=Park->goal; Ride.speed=0;
+        Ride.Tick(.01,{0,0,true});
+        TestTrue(TEXT("After both crossings the park delivery pays and completes the campaign"),
+            Ride.phase==Delivery::Phase::Delivered&&Ride.money==700&&Ride.ActiveCars()==0);
+        Ride.Restart();
+        TestTrue(TEXT("Retry cannot pay the completed park delivery twice"),Ride.phase==Delivery::Phase::Delivered&&Ride.money==700);
+        return !HasAnyErrors();
+    }
     int DirtRoads = 0;
     bool GroundClear = true, InsideMap = true, FlushTriangles = true, LegacyHidden = true;
     double HighestDirt = 0, LowestPavement = 100;
@@ -70,6 +200,13 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
     TestTrue(TEXT("The live map provides a short, clear teaching route"),
         Campaign.DistanceToGoal()<=75.1&&Campaign.DistanceToGoal()>6&&
         Campaign.RouteClear(Campaign.bike,Campaign.layout->goal,2));
+    auto Lesson=Campaign;
+    TestTrue(TEXT("The live teaching route starts with a minute and both pickups"),
+        Lesson.time==60&&Lesson.timePickups[0].available&&Lesson.freezePickups[0].available);
+    Lesson.Start();
+    while(Lesson.phase==Delivery::Phase::Riding&&!Lesson.TrafficFrozen()&&Lesson.elapsed<8) Lesson.Tick(1./120,{1,0,false});
+    TestTrue(TEXT("Following the live teaching street demonstrates both pickups and a slow car"),
+        Lesson.pickupsCollected==1&&Lesson.freezesCollected==1&&Lesson.TrafficFrozen()&&Lesson.ActiveCars()==1&&Lesson.time>60);
     Campaign.Start();
     Campaign.bike=Campaign.layout->goal;
     Campaign.Tick(.01,{0,0,true});
@@ -133,26 +270,47 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
         auto* Pedestrian=World->SpawnActor<ADeliveryPedestrian>();
         if(TestNotNull(TEXT("A pedestrian can spawn on the live map"),Pedestrian))
         {
-            Pedestrian->SetWalk(Walks.front(),1.4f,0,0);
-            Pedestrian->Present(0,*Campaign.layout);
+            const Delivery::PedestrianWalk Walk{Walks.front(),1.4,.5};
+            Pedestrian->SetOutfit(0);
+            auto* Mesh=Pedestrian->FindComponentByClass<USkeletalMeshComponent>();
+            TestTrue(TEXT("A pedestrian uses the imported character and walk animation"),
+                Mesh&&Mesh->GetSkeletalMeshAsset()&&Mesh->GetSingleNodeInstance()&&Mesh->GetSingleNodeInstance()->GetCurrentAsset());
+            Pedestrian->Present(Walk,0,*Campaign.layout);
             const FVector StartPosition=Pedestrian->GetActorLocation();
-            Pedestrian->Present(1,*Campaign.layout);
+            const float StartFrame=Mesh?Mesh->GetPosition():0;
+            Pedestrian->Present(Walk,1,*Campaign.layout);
             TestTrue(TEXT("The pedestrian walks along the route"),FVector::Dist2D(StartPosition,Pedestrian->GetActorLocation())>100);
-            TestFalse(TEXT("The pedestrian does not block the bicycle"),Pedestrian->GetActorEnableCollision());
+            TestTrue(TEXT("Walking also advances the skeletal animation"),Mesh&&!FMath::IsNearlyEqual(StartFrame,Mesh->GetPosition()));
             auto IceRide=Campaign;
             IceRide.bike=IceRide.freezePickups[0].position;IceRide.speed=0;
-            Pedestrian->Present(IceRide.trafficElapsed,*IceRide.layout);
+            Pedestrian->Present(Walk,IceRide.trafficElapsed,*IceRide.layout);
             const FTransform FrozenPose=Pedestrian->GetActorTransform();
+            const float FrozenFrame=Mesh?Mesh->GetPosition():0;
             IceRide.Tick(1./120,{0,0,true});
-            IceRide.Tick(4.9,{0,0,true});
-            Pedestrian->Present(IceRide.trafficElapsed,*IceRide.layout);
-            TestTrue(TEXT("An active snowflake holds the pedestrian's position and facing"),
-                IceRide.TrafficFrozen()&&Pedestrian->GetActorTransform().Equals(FrozenPose));
+            IceRide.Tick(Delivery::Simulation::FreezeDuration-.1,{0,0,true});
+            Pedestrian->Present(Walk,IceRide.trafficElapsed,*IceRide.layout);
+            TestTrue(TEXT("An active snowflake holds the pedestrian's position and animation"),
+                IceRide.TrafficFrozen()&&Pedestrian->GetActorTransform().Equals(FrozenPose)&&Mesh&&FMath::IsNearlyEqual(FrozenFrame,Mesh->GetPosition()));
             IceRide.Tick(.2,{0,0,true});
-            Pedestrian->Present(IceRide.trafficElapsed,*IceRide.layout);
+            Pedestrian->Present(Walk,IceRide.trafficElapsed,*IceRide.layout);
             TestTrue(TEXT("The pedestrian resumes walking without jumping ahead after thawing"),
                 !IceRide.TrafficFrozen()&&FVector::Dist2D(Pedestrian->GetActorLocation(),FrozenPose.GetLocation())>5&&
                 FVector::Dist2D(Pedestrian->GetActorLocation(),FrozenPose.GetLocation())<20);
+            auto ContactRide=Campaign;
+            ContactRide.pedestrians={Walk};
+            ContactRide.freezeRemaining=5;
+            ContactRide.speed=Delivery::Simulation::BikeMaxSpeed;
+            const auto Contact=Walk.Sample(0);
+            const auto Forward=Delivery::Simulation::Forward(Contact.heading);
+            ContactRide.heading=Contact.heading;
+            ContactRide.bike=Contact.position-Forward*2;
+            ContactRide.Tick(.35,{1,0,false});
+            const auto Separation=ContactRide.bike-Contact.position;
+            TestTrue(TEXT("A rider at full speed cannot ride through a frozen pedestrian"),
+                Separation.x*Forward.x+Separation.y*Forward.y<-.89&&ContactRide.speed<9&&
+                ContactRide.phase==Delivery::Phase::Riding&&ContactRide.pedestrianHits==1);
+            ContactRide.Tick(.35,{1,0,false});
+            TestEqual(TEXT("Holding against the same pedestrian does not repeat the impact"),ContactRide.pedestrianHits,1);
             Pedestrian->Destroy();
         }
     }

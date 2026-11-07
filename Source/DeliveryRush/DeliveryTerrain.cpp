@@ -22,6 +22,7 @@
 
 namespace
 {
+constexpr double ParkTerrainExtent=154;
 struct MeshData
 {
     std::function<double(double,double)> Height=Delivery::GroundHeight;
@@ -168,12 +169,13 @@ void ADeliveryTerrain::PreSave(FObjectPreSaveContext SaveContext)
 double ADeliveryTerrain::SampleHeight(double X,double Y) const
 {
     using namespace Delivery;
-    constexpr int Side=int(2*TerrainExtent/TerrainGridStep)+1;
+    const double Extent=bParkGround?ParkTerrainExtent:TerrainExtent;
+    const int Side=int(2*Extent/TerrainGridStep)+1;
     if(!bUseLevelHills||HeightSamples.Num()!=Side*Side) return GroundHeight(X,Y);
-    X=FMath::Clamp(X,-TerrainExtent,TerrainExtent);Y=FMath::Clamp(Y,-TerrainExtent,TerrainExtent);
-    const int IX=FMath::Min(FMath::FloorToInt((X+TerrainExtent)/TerrainGridStep),Side-2);
-    const int IY=FMath::Min(FMath::FloorToInt((Y+TerrainExtent)/TerrainGridStep),Side-2);
-    const double U=(X+TerrainExtent)/TerrainGridStep-IX,V=(Y+TerrainExtent)/TerrainGridStep-IY;
+    X=FMath::Clamp(X,-Extent,Extent);Y=FMath::Clamp(Y,-Extent,Extent);
+    const int IX=FMath::Min(FMath::FloorToInt((X+Extent)/TerrainGridStep),Side-2);
+    const int IY=FMath::Min(FMath::FloorToInt((Y+Extent)/TerrainGridStep),Side-2);
+    const double U=(X+Extent)/TerrainGridStep-IX,V=(Y+Extent)/TerrainGridStep-IY;
     const int Index=IX*Side+IY;
     const double A=HeightSamples[Index],B=HeightSamples[Index+Side],C=HeightSamples[Index+1],D=HeightSamples[Index+Side+1];
     return U>=V?A*(1-U)+B*(U-V)+D*V:A*(1-V)+C*(V-U)+D*U;
@@ -181,15 +183,16 @@ double ADeliveryTerrain::SampleHeight(double X,double Y) const
 void ADeliveryTerrain::BuildSurface()
 {
     using namespace Delivery;
+    const double Extent=bParkGround?ParkTerrainExtent:TerrainExtent;
     if(bUseLevelHills)
     {
         TArray<ADeliveryHill*> Hills;
         if(GetWorld()) for(TActorIterator<ADeliveryHill> It(GetWorld());It;++It) Hills.Add(*It);
-        constexpr int Side=int(2*TerrainExtent/TerrainGridStep)+1;
+        const int Side=int(2*Extent/TerrainGridStep)+1;
         HeightSamples.SetNumZeroed(Side*Side);
         for(int X=0;X<Side;++X) for(int Y=0;Y<Side;++Y)
         {
-            const double PX=(-TerrainExtent+X*TerrainGridStep)*100,PY=(-TerrainExtent+Y*TerrainGridStep)*100;
+            const double PX=(-Extent+X*TerrainGridStep)*100,PY=(-Extent+Y*TerrainGridStep)*100;
             double H=0;
             for(auto* Hill:Hills)
             {
@@ -205,8 +208,12 @@ void ADeliveryTerrain::BuildSurface()
     MeshData* Sections[]={&City,&Grass,&Road,&Pavement,&Dirt,&Markings};
     for(auto* Section:Sections) Section->Height=[this](double X,double Y){ return SampleHeight(X,Y); };
     // Ground samples align to the shared grid and diagonal in GroundHeight().
-    City.Ribbon(-TerrainExtent,0,ParkMinX,0,2*TerrainExtent,0);
-    Grass.Ribbon(ParkMinX,0,TerrainExtent,0,2*TerrainExtent,0);
+    if(bParkGround) Grass.Ribbon(-Extent,0,Extent,0,2*Extent,0);
+    else
+    {
+        City.Ribbon(-Extent,0,ParkMinX,0,2*Extent,0);
+        Grass.Ribbon(ParkMinX,0,Extent,0,2*Extent,0);
+    }
     if(!bUseLevelHills)
     {
     for(int axis=-180;axis<=180;axis+=90)

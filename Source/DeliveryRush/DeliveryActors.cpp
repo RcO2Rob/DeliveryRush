@@ -1,13 +1,17 @@
 #include "DeliveryActors.h"
 #include "DeliveryLevel.h"
+#include "Animation/AnimSequence.h"
 #include "CanvasItem.h"
 #include "Camera/CameraComponent.h"
 #include "Components/AudioComponent.h"
+#include "Components/PoseableMeshComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -20,6 +24,7 @@
 #include "Sound/SoundBase.h"
 #include "Sound/SoundAttenuation.h"
 #include "Styling/CoreStyle.h"
+#include "TwoBoneIK.h"
 #include <cmath>
 
 namespace
@@ -33,6 +38,21 @@ const FLinearColor Red(1.f, .24f, .23f);
 const FLinearColor Ice(.42f, .87f, 1.f);
 const FLinearColor TimerYellow(1.f, .76f, .095f);
 const FLinearColor TimerInk(.035f, .027f, .014f);
+const FVector BicycleCrank(0, 0, 36);
+const FVector BicycleStem(44, 0, 94);
+const FVector BicycleGrip(-4, 27, 22);
+
+struct TrafficCarModel
+{
+    const TCHAR* Name;
+    double FrontAxle, RearAxle, HalfTrack, WheelRadius;
+};
+
+// Axle centers in the imported meshes, in centimeters from the chassis origin.
+constexpr TrafficCarModel TrafficCarModels[] = {
+    {TEXT("Compact"),115.866,-121.070,68.783,26.189},
+    {TEXT("Sport"),130.650,-131.093,69.822,28.039}
+};
 
 const TCHAR* StageTitle(Delivery::CampaignStage Stage)
 {
@@ -41,6 +61,7 @@ const TCHAR* StageTitle(Delivery::CampaignStage Stage)
         case Delivery::CampaignStage::Tutorial: return TEXT("RIDING LESSON");
         case Delivery::CampaignStage::FirstChase: return TEXT("ONCOMING TRAFFIC");
         case Delivery::CampaignStage::CityRush: return TEXT("CITY RUSH");
+        case Delivery::CampaignStage::ParkCrossing: return TEXT("PARK CROSSING");
     }
     return TEXT("DELIVERY RUSH");
 }
@@ -159,44 +180,30 @@ ADeliveryPedestrian::ADeliveryPedestrian()
 {
     auto* Root=CreateDefaultSubobject<USceneComponent>(TEXT("PedestrianRoot"));
     SetRootComponent(Root);
-    SetActorEnableCollision(false);
-    Shirt=Part(this,Root,TEXT("Shirt"),TEXT("Cube"),FVector(0,0,115),FVector(27,39,48),TEXT("Coral"));
-    Part(this,Root,TEXT("Head"),TEXT("Sphere"),FVector(1,0,155),FVector(25,25,29),TEXT("Skin"));
-    Part(this,Root,TEXT("Hair"),TEXT("Sphere"),FVector(-3,0,165),FVector(23,25,15),TEXT("Ink"));
-    for(int32 Index=0;Index<2;++Index)
-    {
-        const double Side=Index==0?-1.:1.;
-        Arms[Index]=Tube(this,Root,FString::Printf(TEXT("WalkArm%d"),Index),FVector(0,Side*22,133),FVector(0,Side*24,87),10,TEXT("Skin"));
-        Legs[Index]=Tube(this,Root,FString::Printf(TEXT("WalkLeg%d"),Index),FVector(0,Side*11,93),FVector(0,Side*12,7),13,TEXT("Navy"));
-    }
+    Mesh=CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("PedestrianMesh"));
+    Mesh->SetupAttachment(Root);
+    Mesh->SetRelativeRotation(FRotator(0,-90,0));
+    // Bicycle contact is resolved by the ride simulation at the shared walk position.
+    Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    Mesh->SetSkeletalMesh(LoadObject<USkeletalMesh>(nullptr,TEXT("/Game/Art/Courier/SK_Courier.SK_Courier")));
+    WalkAnimation=LoadObject<UAnimSequence>(nullptr,TEXT("/Game/Art/Courier/A_PedestrianWalk.A_PedestrianWalk"));
 }
-void ADeliveryPedestrian::SetWalk(const Delivery::WalkRoute& Walk,float Speed,float StartProgress,int32 Outfit)
+void ADeliveryPedestrian::SetOutfit(int32 Outfit)
 {
-    Route=Walk;
-    WalkSpeed=Speed;
-    const auto Delta=Route.end-Route.start;
-    InitialDistance=std::hypot(Delta.x,Delta.y)*StartProgress;
     const TCHAR* Colors[]={TEXT("Coral"),TEXT("Teal"),TEXT("Amber"),TEXT("Sage"),TEXT("Ivory")};
     const FString MaterialPath=FString::Printf(TEXT("/Game/Art/M_%s.M_%s"),Colors[Outfit],Colors[Outfit]);
-    if(auto* Material=LoadObject<UMaterialInterface>(nullptr,*MaterialPath)) Shirt->SetMaterial(0,Material);
+    if(auto* Material=LoadObject<UMaterialInterface>(nullptr,*MaterialPath)) Mesh->SetMaterialByName(TEXT("Purple"),Material);
+    Mesh->PlayAnimation(WalkAnimation,true);
+    Mesh->Stop();
 }
-void ADeliveryPedestrian::Present(double Elapsed,const Delivery::LevelLayout& Level)
+void ADeliveryPedestrian::Present(const Delivery::PedestrianWalk& Walk,double Elapsed,const Delivery::LevelLayout& Level)
 {
-    const auto Delta=Route.end-Route.start;
-    const double Length=std::hypot(Delta.x,Delta.y);
-    const double Distance=InitialDistance+Elapsed*WalkSpeed;
-    const double Cycle=std::fmod(Distance,2*Length);
-    const bool Returning=Cycle>=Length;
-    const auto Position=Route.start+Delta*((Returning?2*Length-Cycle:Cycle)/Length);
-    const double Yaw=FMath::RadiansToDegrees(std::atan2(Delta.y,Delta.x))+(Returning?180:0);
-    SetActorLocationAndRotation(FVector(Position.x*100,Position.y*100,Level.height(Position.x,Position.y)*100),FRotator(0,Yaw,0));
-    const double Stride=std::sin(Distance*5.5);
-    for(int32 Index=0;Index<2;++Index)
-    {
-        const double Side=Index==0?-1.:1., Swing=Side*Stride;
-        Between(Legs[Index],FVector(0,Side*11,93),FVector(Swing*29,Side*12,7+FMath::Max(0.,Swing)*14),13);
-        Between(Arms[Index],FVector(0,Side*22,133),FVector(-Swing*18,Side*24,87+FMath::Abs(Swing)*4),10);
-    }
+    const auto Pose=Walk.Sample(Elapsed);
+    const auto Position=Pose.position;
+    SetActorLocationAndRotation(FVector(Position.x*100,Position.y*100,Level.height(Position.x,Position.y)*100),
+        FRotator(0,FMath::RadiansToDegrees(Pose.heading),0));
+    constexpr double StrideLength=1.7;
+    if(WalkAnimation) Mesh->SetPosition(float(std::fmod(Pose.distance/StrideLength,1.)*WalkAnimation->GetPlayLength()),false);
 }
 
 ADeliveryBike::ADeliveryBike()
@@ -205,10 +212,13 @@ ADeliveryBike::ADeliveryBike()
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
     Body = CreateDefaultSubobject<USceneComponent>(TEXT("BicycleAndCourier"));
     Body->SetupAttachment(RootComponent);
+    Steering = CreateDefaultSubobject<USceneComponent>(TEXT("Steering"));
+    Steering->SetupAttachment(Body);
+    Steering->SetRelativeLocation(BicycleStem);
     FrontWheel = CreateDefaultSubobject<USceneComponent>(TEXT("FrontWheel"));
     RearWheel = CreateDefaultSubobject<USceneComponent>(TEXT("RearWheel"));
-    FrontWheel->SetupAttachment(Body); RearWheel->SetupAttachment(Body);
-    FrontWheel->SetRelativeLocation(FVector(65, 0, 36));
+    FrontWheel->SetupAttachment(Steering); RearWheel->SetupAttachment(Body);
+    FrontWheel->SetRelativeLocation(FVector(65, 0, 36) - BicycleStem);
     RearWheel->SetRelativeLocation(FVector(-65, 0, 36));
     for (int32 Index = 0; Index < 2; ++Index)
     {
@@ -223,25 +233,31 @@ ADeliveryBike::ADeliveryBike()
         Tube(this, Wheel, Prefix + TEXT("SpokeA"), FVector(-26, -4, 0), FVector(26, -4, 0), 3, TEXT("Ink"));
         Tube(this, Wheel, Prefix + TEXT("SpokeB"), FVector(0, -4, -26), FVector(0, -4, 26), 3, TEXT("Ink"));
     }
-    const FVector Rear(-65, 0, 36), Front(65, 0, 36), Crank(0, 0, 36), Seat(-28, 0, 91), Stem(44, 0, 94);
+    const FVector Rear(-65, 0, 36), Seat(-28, 0, 91);
     Tube(this, Body, TEXT("FrameRearUpper"), Rear, Seat, 5, TEXT("Coral"));
-    Tube(this, Body, TEXT("FrameRearLower"), Rear, Crank, 5, TEXT("Coral"));
-    Tube(this, Body, TEXT("FrameSeat"), Crank, Seat, 5, TEXT("Coral"));
-    Tube(this, Body, TEXT("FrameTop"), Seat, Stem, 5, TEXT("Coral"));
-    Tube(this, Body, TEXT("FrameDiagonal"), Crank, Stem, 5, TEXT("Coral"));
-    Tube(this, Body, TEXT("Fork"), Stem, Front, 5, TEXT("Silver"));
-    Tube(this, Body, TEXT("HandlebarStem"), Stem, FVector(42, 0, 114), 4, TEXT("Silver"));
-    Tube(this, Body, TEXT("Handlebar"), FVector(42, -30, 114), FVector(42, 30, 114), 5, TEXT("Ink"));
+    Tube(this, Body, TEXT("FrameRearLower"), Rear, BicycleCrank, 5, TEXT("Coral"));
+    Tube(this, Body, TEXT("FrameSeat"), BicycleCrank, Seat, 5, TEXT("Coral"));
+    Tube(this, Body, TEXT("FrameTop"), Seat, BicycleStem, 5, TEXT("Coral"));
+    Tube(this, Body, TEXT("FrameDiagonal"), BicycleCrank, BicycleStem, 5, TEXT("Coral"));
+    Tube(this, Steering, TEXT("Fork"), FVector::ZeroVector, FrontWheel->GetRelativeLocation(), 5, TEXT("Silver"));
+    Tube(this, Steering, TEXT("HandlebarStem"), FVector::ZeroVector, FVector(BicycleGrip.X, 0, BicycleGrip.Z), 4, TEXT("Silver"));
+    Tube(this, Steering, TEXT("Handlebar"), FVector(BicycleGrip.X, -30, BicycleGrip.Z), FVector(BicycleGrip.X, 30, BicycleGrip.Z), 5, TEXT("Ink"));
     Part(this, Body, TEXT("Saddle"), TEXT("Cube"), FVector(-29, 0, 94), FVector(30, 20, 7), TEXT("Ink"));
     Part(this, Body, TEXT("Parcel"), TEXT("Cube"), FVector(-63, 0, 105), FVector(38, 40, 38), TEXT("Amber"));
     Part(this, Body, TEXT("ParcelStrap"), TEXT("Cube"), FVector(-63, 0, 125), FVector(39, 9, 2), TEXT("Ivory"));
-    Part(this, Body, TEXT("Jacket"), TEXT("Cube"), FVector(-1, 0, 132), FVector(34, 35, 48), TEXT("Teal"), FRotator(20, 0, 0));
-    Part(this, Body, TEXT("Head"), TEXT("Sphere"), FVector(15, 0, 168), FVector(25, 25, 28), TEXT("Skin"));
-    Part(this, Body, TEXT("Helmet"), TEXT("Sphere"), FVector(14, 0, 178), FVector(30, 29, 17), TEXT("Ivory"));
-    Tube(this, Body, TEXT("LeftArm"), FVector(5, -18, 143), FVector(42, -28, 115), 10, TEXT("Teal"));
-    Tube(this, Body, TEXT("RightArm"), FVector(5, 18, 143), FVector(42, 28, 115), 10, TEXT("Teal"));
-    for (int32 Index = 0; Index < 4; ++Index)
-        Legs[Index] = Tube(this, Body, FString::Printf(TEXT("Leg%d"), Index), FVector(0, 0, 90), FVector(0, 0, 50), 10, TEXT("Navy"));
+    Tube(this, Body, TEXT("CrankAxle"), BicycleCrank-FVector(0,12,0), BicycleCrank+FVector(0,12,0), 4, TEXT("Silver"));
+    for (int32 Side = 0; Side < 2; ++Side)
+    {
+        const FString Prefix = Side == 0 ? TEXT("Left") : TEXT("Right");
+        CrankArms[Side] = Tube(this, Body, Prefix + TEXT("Crank"), BicycleCrank, BicycleCrank + FVector(15, 0, 0), 3, TEXT("Silver"));
+        Pedals[Side] = Part(this, Body, Prefix + TEXT("Pedal"), TEXT("Cube"), BicycleCrank, FVector(11, 14, 2.5), TEXT("Ink"));
+    }
+    Courier = CreateDefaultSubobject<UPoseableMeshComponent>(TEXT("Courier"));
+    Courier->SetupAttachment(Body);
+    Courier->SetRelativeRotation(FRotator(0,-90,0));
+    Courier->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    Courier->SetSkinnedAssetAndUpdate(LoadObject<USkeletalMesh>(nullptr, TEXT("/Game/Art/Courier/SK_Courier.SK_Courier")));
+    Helmet = Part(this, Body, TEXT("Helmet"), TEXT("Sphere"), FVector::ZeroVector, FVector(28, 26, 15), TEXT("Amber"));
     CameraArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
     CameraArm->SetupAttachment(RootComponent);
     CameraArm->SetUsingAbsoluteRotation(true);
@@ -260,25 +276,107 @@ void ADeliveryBike::Look(float X, float Y, bool Held, float Dt)
     if(Held) { OrbitYaw=FMath::Clamp(OrbitYaw+X*1.4f,-160.f,160.f); OrbitPitch=FMath::Clamp(OrbitPitch+Y,-35.f,-8.f); }
     else { OrbitYaw=FMath::FInterpTo(OrbitYaw,0.f,Dt,3.f); OrbitPitch=FMath::FInterpTo(OrbitPitch,-18.f,Dt,2.f); }
 }
-void ADeliveryBike::Present(const Delivery::Simulation& State, float DeltaSeconds)
+void ADeliveryBike::PresentCourier(const FVector (&PedalPositions)[2])
+{
+    const auto* Mesh = Courier->GetSkinnedAsset();
+    if(!Mesh) return;
+    const auto& Skeleton = Mesh->GetRefSkeleton();
+    const FQuat ForwardLean(-FVector::ForwardVector,FMath::DegreesToRadians(52.0));
+    auto& LocalPose = Courier->BoneSpaceTransforms;
+    if(SeatedPose.IsEmpty())
+    {
+        HipsBone = Skeleton.FindBoneIndex(TEXT("Hips"));
+        NeckBone = Skeleton.FindBoneIndex(TEXT("Neck"));
+        Legs[0] = FIntVector(Skeleton.FindBoneIndex(TEXT("UpperLeg_L")),Skeleton.FindBoneIndex(TEXT("LowerLeg_L")),Skeleton.FindBoneIndex(TEXT("Foot_L")));
+        Legs[1] = FIntVector(Skeleton.FindBoneIndex(TEXT("UpperLeg_R")),Skeleton.FindBoneIndex(TEXT("LowerLeg_R")),Skeleton.FindBoneIndex(TEXT("Foot_R")));
+        Arms[0] = FIntVector(Skeleton.FindBoneIndex(TEXT("UpperArm_L")),Skeleton.FindBoneIndex(TEXT("LowerArm_L")),Skeleton.FindBoneIndex(TEXT("Wrist_L")));
+        Arms[1] = FIntVector(Skeleton.FindBoneIndex(TEXT("UpperArm_R")),Skeleton.FindBoneIndex(TEXT("LowerArm_R")),Skeleton.FindBoneIndex(TEXT("Wrist_R")));
+        LocalPose = Skeleton.GetRefBonePose();
+        SeatedPose.SetNumUninitialized(LocalPose.Num());
+        SeatedPose[0] = LocalPose[0];
+        for(int32 Bone=1; Bone<LocalPose.Num(); ++Bone)
+        {
+            const FTransform& Parent = SeatedPose[Skeleton.GetParentIndex(Bone)];
+            FTransform& Pose = SeatedPose[Bone];
+            Pose = LocalPose[Bone]*Parent;
+            if(Bone==HipsBone || Bone==NeckBone)
+            {
+                Pose.SetRotation(((Bone==HipsBone?ForwardLean:ForwardLean.Inverse())*Pose.GetRotation()).GetNormalized());
+                LocalPose[Bone] = Pose.GetRelativeTransform(Parent);
+            }
+        }
+        const FVector LegCenter = (SeatedPose[Legs[0].X].GetLocation()+SeatedPose[Legs[1].X].GetLocation())*.5;
+        Courier->SetRelativeLocation(FVector(-28,0,108)-Courier->GetRelativeRotation().RotateVector(LegCenter));
+        const FVector Head = SeatedPose[Skeleton.FindBoneIndex(TEXT("Head"))].GetLocation();
+        Helmet->SetRelativeLocation(Courier->GetRelativeTransform().TransformPosition(Head)+FVector(0,0,23));
+
+        for(int32 Side=0; Side<2; ++Side)
+        {
+            const TCHAR Suffix = Side==0?'L':'R';
+            const FVector CurlAxis = ForwardLean.RotateVector(FVector::RightVector*(Side==0?1.:-1.));
+            for(const TCHAR* Finger : {TEXT("Index"),TEXT("Middle"),TEXT("Ring"),TEXT("Pinky")})
+            {
+                for(int32 Segment=2; Segment<=4; ++Segment)
+                {
+                    const int32 Bone = Skeleton.FindBoneIndex(*FString::Printf(TEXT("%s%d_%c"),Finger,Segment,Suffix));
+                    const FVector Axis = SeatedPose[Bone].InverseTransformVectorNoScale(CurlAxis);
+                    const FQuat Curl(Axis,FMath::DegreesToRadians(Segment==4?35.:55.));
+                    LocalPose[Bone].SetRotation((LocalPose[Bone].GetRotation()*Curl).GetNormalized());
+                }
+            }
+        }
+    }
+
+    const FTransform MeshToBike = Courier->GetRelativeTransform();
+    const FTransform HandlebarToBike = Steering->GetRelativeTransform();
+    const auto PoseLimb = [&](FIntVector Bones, FVector Target, FVector Bend, FQuat EndRotation)
+    {
+        FTransform Upper = SeatedPose[Bones.X], Lower = SeatedPose[Bones.Y], End = SeatedPose[Bones.Z];
+        AnimationCore::SolveTwoBoneIK(Upper,Lower,End,MeshToBike.InverseTransformPosition(Bend),
+            MeshToBike.InverseTransformPosition(Target),false,1,1);
+        End.SetRotation(EndRotation);
+        LocalPose[Bones.X] = Upper.GetRelativeTransform(SeatedPose[Skeleton.GetParentIndex(Bones.X)]);
+        LocalPose[Bones.Y] = Lower.GetRelativeTransform(Upper);
+        LocalPose[Bones.Z] = End.GetRelativeTransform(Lower);
+    };
+    for(int32 Side=0; Side<2; ++Side)
+    {
+        const double Sign = Side==0?-1.:1.;
+        PoseLimb(Legs[Side],PedalPositions[Side]+FVector(-10,0,4),FVector(68,Sign*20,75),
+            SeatedPose[Legs[Side].Z].GetRotation());
+        const FVector Wrist = HandlebarToBike.TransformPosition(FVector(BicycleGrip.X-12,Sign*BicycleGrip.Y,BicycleGrip.Z+3.5));
+        const FQuat GripRotation = HandlebarToBike.GetRotation()*FQuat(FVector::UpVector,-Sign*PI/2);
+        const FQuat WristRotation = MeshToBike.GetRotation().Inverse()*GripRotation*MeshToBike.GetRotation()*
+            ForwardLean.Inverse()*SeatedPose[Arms[Side].Z].GetRotation();
+        PoseLimb(Arms[Side],Wrist,FVector(17,Sign*43,103),WristRotation.GetNormalized());
+    }
+    Courier->RefreshBoneTransforms();
+}
+void ADeliveryBike::Present(const Delivery::Simulation& State, float DeltaSeconds, bool bPedaling)
 {
     PlaceOnSurface(this,State.bike,State.heading,.65,.25,State.layout.get());
     CameraArm->SetWorldRotation(FRotator(OrbitPitch,FMath::RadiansToDegrees(float(State.heading))+OrbitYaw,0));
     const float Lean=float(State.steering);
     Body->SetRelativeRotation(FRotator(0,0,-Lean*9+FMath::RadiansToDegrees(float(State.roll))));
     WheelAngle+=float(State.phase==Delivery::Phase::Riding?State.speed:0)*DeltaSeconds*165;
-    FrontWheel->SetRelativeRotation(FRotator(WheelAngle,Lean*19,0));
+    Steering->SetRelativeRotation(FRotator(0,Lean*19,0));
+    FrontWheel->SetRelativeRotation(FRotator(WheelAngle,0,0));
     RearWheel->SetRelativeRotation(FRotator(WheelAngle,0,0));
     // The forward pedal moves down on the power stroke as the bike advances.
-    const float Angle=FMath::DegreesToRadians(-WheelAngle*.45f);
+    if(bPedaling && State.phase==Delivery::Phase::Riding && State.speed>0)
+        PedalAngle=FMath::Fmod(PedalAngle-FMath::Min(480.f,float(State.speed)*38.f)*DeltaSeconds,360.f);
+    FVector PedalPositions[2];
     for(int32 Side=0;Side<2;++Side)
     {
-        const float Sign=Side==0?-1.f:1.f, Pedal=Angle+Side*PI;
-        FVector Hip(-22,Sign*14,109);
-        FVector Knee(4+FMath::Cos(Pedal)*13,Sign*17,77+FMath::Sin(Pedal)*12);
-        FVector Foot(FMath::Cos(Pedal)*18,Sign*17,37+FMath::Sin(Pedal)*18);
-        Between(Legs[Side*2],Hip,Knee,12); Between(Legs[Side*2+1],Knee,Foot,10);
+        const float Sign=Side==0?-1.f:1.f;
+        const float Angle=FMath::DegreesToRadians(PedalAngle)+Side*PI;
+        const FVector ArmBase=BicycleCrank+FVector(0,Sign*12,0);
+        const FVector ArmEnd=ArmBase+FVector(FMath::Cos(Angle)*16,0,FMath::Sin(Angle)*16);
+        PedalPositions[Side]=ArmEnd+FVector(0,Sign*7,0);
+        Between(CrankArms[Side],ArmBase,ArmEnd,3);
+        Pedals[Side]->SetRelativeLocation(PedalPositions[Side]);
     }
+    PresentCourier(PedalPositions);
     const float Fov=State.phase==Delivery::Phase::Riding?80+float(FMath::Abs(State.speed))*.35f:82;
     Camera->SetFieldOfView(FMath::FInterpTo(Camera->FieldOfView,Fov,DeltaSeconds,3));
     Camera->SetRelativeLocation(FVector(0,State.hitFlash>0?FMath::Sin(float(State.elapsed)*80)*float(State.hitFlash)*8:0,0));
@@ -307,39 +405,86 @@ ADeliveryCar::ADeliveryCar()
     BrakeAudio->SetVolumeMultiplier(.30f);
     Body=CreateDefaultSubobject<USceneComponent>(TEXT("CarBody"));
     Body->SetupAttachment(RootComponent);
-    Body->SetRelativeLocation(FVector(0,0,70));
-    Chassis=Part(this, Body, TEXT("Chassis"), TEXT("Cube"), FVector(0, 0, -14), FVector(410, 180, 65), TEXT("Coral"));
-    Part(this, Body, TEXT("Cabin"), TEXT("Cube"), FVector(-12, 0, 40), FVector(200, 160, 65), TEXT("Navy"));
-    Roof=Part(this, Body, TEXT("Roof"), TEXT("Cube"), FVector(-12, 0, 76), FVector(205, 164, 10), TEXT("Coral"));
-    for (int32 Side : {-1, 1})
+    Chassis=CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Chassis"));
+    Chassis->SetupAttachment(Body);
+    Chassis->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    const FName WheelNames[]={TEXT("FrontLeftWheel"),TEXT("FrontRightWheel"),TEXT("RearLeftWheel"),TEXT("RearRightWheel")};
+    for(int32 Index=0; Index<UE_ARRAY_COUNT(Wheels); ++Index)
     {
-        for (int32 End : {-1, 1})
-            Part(this, Body, FString::Printf(TEXT("Wheel%d_%d"), Side, End), TEXT("Cylinder"),
-                FVector(End * 132, Side * 91, -37), FVector(66, 66, 18), TEXT("Ink"), FRotator(0, 0, 90));
-        Part(this, Body, FString::Printf(TEXT("Headlamp%d"), Side), TEXT("Cube"),
-            FVector(207, Side * 57, -6), FVector(4, 38, 16), TEXT("GlowAmber"));
-        Part(this, Body, FString::Printf(TEXT("TailLamp%d"), Side), TEXT("Cube"),
-            FVector(-207, Side * 62, -6), FVector(4, 30, 12), TEXT("GlowRed"));
+        Wheels[Index]=CreateDefaultSubobject<UStaticMeshComponent>(WheelNames[Index]);
+        Wheels[Index]->SetupAttachment(Body);
+        Wheels[Index]->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        if(Index%2) Wheels[Index]->SetRelativeScale3D(FVector(1,-1,1));
     }
 }
 void ADeliveryCar::Present(const Delivery::Car& State,const Delivery::LevelLayout* Level)
 {
     const bool Visible=State.phase!=Delivery::CarPhase::Waiting;
     SetActorHiddenInGame(!Visible);
-    if(!Visible) return;
-    PlaceOnSurface(this,State.position,State.heading,1.32,.91,Level);
-    const float Roll=float(State.roll);
-    Body->SetRelativeRotation(FRotator(0,0,FMath::RadiansToDegrees(Roll)));
-    Body->SetRelativeLocation(FVector(0,0,FMath::Abs(FMath::Sin(Roll))*100+FMath::Abs(FMath::Cos(Roll))*70));
+    if(!Visible) { bHasPreviousPose=false; return; }
+
+    constexpr double RollPivotHeight=70;
+    const int32 PaintIndex=FMath::Max(0,State.identity-1);
+    const auto& Model=TrafficCarModels[PaintIndex%UE_ARRAY_COUNT(TrafficCarModels)];
     if(PaintedIdentity!=State.identity)
     {
+        const auto LoadPart=[&Model](const TCHAR* PartName)
+        {
+            const FString Name=FString::Printf(TEXT("SM_%s%s"),Model.Name,PartName);
+            return LoadObject<UStaticMesh>(nullptr,*FString::Printf(TEXT("/Game/Art/Cars/%s.%s"),*Name,*Name));
+        };
+        Chassis->SetStaticMesh(LoadPart(TEXT("Body")));
+        auto* WheelMesh=LoadPart(TEXT("Wheel"));
+        for(int32 Index=0; Index<UE_ARRAY_COUNT(Wheels); ++Index)
+        {
+            Wheels[Index]->SetStaticMesh(WheelMesh);
+            Wheels[Index]->SetRelativeLocation(FVector(Index<2?Model.FrontAxle:Model.RearAxle,
+                Index%2?Model.HalfTrack:-Model.HalfTrack,Model.WheelRadius-RollPivotHeight));
+        }
         const TCHAR* Colors[]={TEXT("Coral"),TEXT("Navy"),TEXT("Sand"),TEXT("Sage"),TEXT("Teal"),TEXT("Ivory"),TEXT("Brick"),TEXT("Silver")};
-        const TCHAR* Color=Colors[FMath::Max(0,State.identity-1)%8];
+        const TCHAR* Color=Colors[PaintIndex%UE_ARRAY_COUNT(Colors)];
         const FString Path=FString::Printf(TEXT("/Game/Art/M_%s.M_%s"),Color,Color);
         if(auto* Mat=LoadObject<UMaterialInterface>(nullptr,*Path))
-        { Chassis->SetMaterial(0,Mat); Roof->SetMaterial(0,Mat); }
+            Chassis->SetMaterialByName(TEXT("Paint"),Mat);
         PaintedIdentity=State.identity;
+        bHasPreviousPose=false;
     }
+    if(!bHasPreviousPose)
+    {
+        WheelAngle=0;
+        FrontSteer=0;
+    }
+    else
+    {
+        const auto Offset=State.position-PreviousPosition;
+        const double Distance=(Offset.x*FMath::Cos(State.heading)+Offset.y*FMath::Sin(State.heading))*100;
+        // The simulation leaves both position and heading unchanged while traffic is frozen.
+        if(FMath::Abs(Distance)>.01)
+        {
+            WheelAngle=FMath::Fmod(WheelAngle-FMath::RadiansToDegrees(Distance/Model.WheelRadius),360.);
+            const double Turn=FMath::FindDeltaAngleRadians(PreviousHeading,State.heading);
+            FrontSteer=FMath::Clamp(FMath::RadiansToDegrees(FMath::Atan((Model.FrontAxle-Model.RearAxle)*Turn/Distance)),-32.,32.);
+        }
+    }
+    PreviousPosition=State.position;
+    PreviousHeading=State.heading;
+    bHasPreviousPose=true;
+    for(int32 Index=0; Index<UE_ARRAY_COUNT(Wheels); ++Index)
+        Wheels[Index]->SetRelativeRotation(FRotator(WheelAngle,Index<2?FrontSteer:0,0));
+
+    PlaceOnSurface(this,State.position,State.heading,1.32,.91,Level);
+    Body->SetRelativeRotation(FRotator(0,0,FMath::RadiansToDegrees(State.roll)));
+    const double Side=FMath::Abs(FMath::Sin(State.roll));
+    const double Up=FMath::Cos(State.roll);
+    const UStaticMesh* Tire=Wheels[2]->GetStaticMesh();
+    const double TireHalfWidth=Tire?Tire->GetBounds().BoxExtent.Y:0;
+    double Support=Side*(Model.HalfTrack+TireHalfWidth)+FMath::Abs(Up)*Model.WheelRadius-Up*(Model.WheelRadius-RollPivotHeight);
+    if(const UStaticMesh* Mesh=Chassis->GetStaticMesh())
+    {
+        const auto Bounds=Mesh->GetBounds();
+        Support=FMath::Max(Support,Side*Bounds.BoxExtent.Y+FMath::Abs(Up)*Bounds.BoxExtent.Z-Up*Bounds.Origin.Z);
+    }
+    Body->SetRelativeLocation(FVector(0,0,Support));
 }
 
 void ADeliveryCar::UpdateAudio(const Delivery::Car& State, bool Audible, float DeltaSeconds)
@@ -387,7 +532,10 @@ void ADeliveryGameMode::BeginPlay()
     Attenuation.DistanceAlgorithm = EAttenuationDistanceModel::Linear;
     Attenuation.AttenuationShapeExtents = FVector(1000, 0, 0);
     Attenuation.FalloffDistance = 9000.f;
-    Ride.BeginCampaign(Delivery::ReadLevelLayout(GetWorld()));
+    const auto Level=Delivery::ReadLevelLayout(GetWorld());
+    if(!Level->bridgeCheckpoints.empty())
+        Ride.BeginPark(Level,FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString,TEXT("Cash"),0),0,600));
+    else Ride.BeginCampaign(Level);
     for(TActorIterator<ADeliveryLevelSettings> It(GetWorld());It;++It)
     {
         ClinicGoal=It->GoalActor;
@@ -426,7 +574,7 @@ void ADeliveryGameMode::UpdateMouseInput(APlayerController& Controller) const
 void ADeliveryGameMode::UpdateGoalMarker()
 {
     const bool AtClinic=Ride.IsClinicDelivery();
-    const auto Goal=Ride.layout->goal;
+    const auto Goal=Ride.CurrentTarget();
     UE_LOG(LogTemp, Display, TEXT("DELIVERY_RUSH_STAGE: stage=%d order=%d goal=(%.1f,%.1f) trafficSpeed=%.1f cap=%d"),
         int32(Ride.Stage()),FMath::Min(Ride.deliveriesCompleted+1,Delivery::Simulation::DeliveryCount),Goal.x,Goal.y,
         Ride.Traffic().speed,Ride.Traffic().maxActiveCars);
@@ -437,6 +585,7 @@ void ADeliveryGameMode::UpdateGoalMarker()
     if(!AtClinic)
     {
         const double Ground=Ride.layout->height(Goal.x,Goal.y);
+        PracticeGoal->SetActorScale3D(Ride.HasPendingBridge()?FVector(.5,.5,.8):FVector::OneVector);
         PracticeGoal->SetActorLocation(FVector(Goal.x*100,Goal.y*100,Ground*100));
     }
 }
@@ -451,6 +600,7 @@ void ADeliveryGameMode::SetUpPedestrians()
     PedestrianRefreshPending=false;
     for(auto* Pedestrian:Pedestrians) Pedestrian->Destroy();
     Pedestrians.Reset();
+    Ride.pedestrians.clear();
     if(!Ride.HasDeliverySequence()) return;
 
     const auto& Level=*Ride.layout;
@@ -459,7 +609,8 @@ void ADeliveryGameMode::SetUpPedestrians()
     {
         if(auto* Pedestrian=GetWorld()->SpawnActor<ADeliveryPedestrian>())
         {
-            Pedestrian->SetWalk(Walk,Random.FRandRange(1.15f,1.7f),Random.FRandRange(0.f,2.f),Random.RandRange(0,4));
+            Pedestrian->SetOutfit(Random.RandRange(0,4));
+            Ride.pedestrians.push_back({Walk,Random.FRandRange(1.15f,1.7f),Random.FRandRange(0.f,2.f)});
             Pedestrians.Add(Pedestrian);
         }
     }
@@ -519,6 +670,7 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
     auto* PC=GetWorld()->GetFirstPlayerController();
     if(!PC||!Rider) return;
     const bool WasRiding=Ride.phase==Delivery::Phase::Riding;
+    const auto PreviousBridges=Ride.bridgesCrossed;
     if(PC->WasInputKeyJustPressed(EKeys::R)) Ride.Restart();
     if(PC->WasInputKeyJustPressed(EKeys::Enter))
     {
@@ -526,6 +678,16 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
         else if(Ride.phase==Delivery::Phase::Failed) Ride.Restart();
         else if(Ride.phase==Delivery::Phase::Delivered)
         {
+            if(Ride.Stage()==Delivery::CampaignStage::CityRush)
+            {
+                UGameplayStatics::OpenLevel(this,TEXT("/Game/Maps/DeliveryPark"),true,FString::Printf(TEXT("Cash=%d"),Ride.money));
+                return;
+            }
+            if(Ride.Stage()==Delivery::CampaignStage::ParkCrossing)
+            {
+                UGameplayStatics::OpenLevel(this,TEXT("/Game/Maps/DeliveryEditable"));
+                return;
+            }
             Ride.AdvanceStage();
             UpdateGoalMarker();
             SetUpPedestrians();
@@ -546,6 +708,7 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
     float MouseX=0,MouseY=0; PC->GetInputMouseDelta(MouseX,MouseY);
     Rider->Look(MouseX,MouseY,Ride.phase==Delivery::Phase::Riding&&PC->IsInputKeyDown(EKeys::RightMouseButton),DeltaSeconds);
     const int PreviousGrazes=Ride.grazes,PreviousFalls=Ride.falls;
+    const int PreviousPedestrianHits=Ride.pedestrianHits;
     const int PreviousWrecks=Ride.WreckedCars();
     const int PreviousWaves=Ride.wavesStarted;
     const int PreviousPickups=Ride.pickupsCollected;
@@ -562,6 +725,12 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
     const Delivery::Phase PreviousPhase=Ride.phase;
     if(Ride.phase==Delivery::Phase::Riding&&!FApp::HasFocus()) Ride.TogglePause();
     Ride.Tick(DeltaSeconds,Input);
+    if(Ride.bridgesCrossed!=PreviousBridges)
+    {
+        UpdateGoalMarker();
+        if(Ride.bridgesCrossed>PreviousBridges) PlayCue(TEXT("Checkpoint"),.6f);
+        UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_BRIDGES: count=%d"),int32(Ride.bridgesCrossed));
+    }
     if(Ride.deliveriesCompleted>PreviousDeliveries)
     {
         PlayCue(TEXT("Delivery"),.65f);
@@ -574,10 +743,11 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
         UpdateMouseInput(*PC);
         UpdateMusic();
     }
-    Rider->Present(Ride,DeltaSeconds);
+    Rider->Present(Ride,DeltaSeconds,Input.throttle>0 && !Input.brake);
     UpdatePickups();
     if(PedestrianRefreshPending&&!Ride.TrafficFrozen()) SetUpPedestrians();
-    for(auto* Pedestrian:Pedestrians) Pedestrian->Present(Ride.trafficElapsed,*Ride.layout);
+    for(int32 Index=0; Index<Pedestrians.Num(); ++Index)
+        Pedestrians[Index]->Present(Ride.pedestrians[Index],Ride.trafficElapsed,*Ride.layout);
     const bool TrafficAudible = Ride.phase == Delivery::Phase::Riding && !Ride.TrafficFrozen();
     for(int32 Index=0;Index<Cars.Num();++Index)
     {
@@ -616,6 +786,7 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
                 Car.identity,Car.rearAttacks,Ride.elapsed,Car.speed);
     }
     if(Ride.grazes>PreviousGrazes||Ride.falls>PreviousFalls) PlayCue(TEXT("Hit"));
+    else if(Ride.pedestrianHits>PreviousPedestrianHits) PlayCue(TEXT("Hit"),.55f);
     if (Ride.trafficImpact.speed > 0) PlayTrafficImpact();
     if(Ride.WreckedCars()>PreviousWrecks)
     {
@@ -658,7 +829,8 @@ void ADeliveryHUD::DrawHUD()
     if(!Mode) return;
     const auto& S=Mode->Ride;
     const bool Tutorial=S.Stage()==Delivery::CampaignStage::Tutorial;
-    const bool FinalStage=S.Stage()==Delivery::CampaignStage::CityRush;
+    const bool CityRush=S.Stage()==Delivery::CampaignStage::CityRush;
+    const bool Park=S.Stage()==Delivery::CampaignStage::ParkCrossing;
     const bool MultipleOrders=S.HasDeliverySequence();
     Scale=FMath::Min(Canvas->SizeX/1280.f,Canvas->SizeY/720.f);
     if (Scale <= 0) return;
@@ -666,21 +838,17 @@ void ADeliveryHUD::DrawHUD()
     HudHeight = Canvas->SizeY / Scale;
 
     const float TimerX = HudWidth * .5f - 90;
-    const bool TimeLow = !Tutorial && S.time < 20;
+    const bool TimeLow = !S.TrafficFrozen() && S.time < 20;
     Rect(TimerX, 20, 180, 74, TimerYellow);
     Rect(TimerX, 90, 180, 4, TimeLow ? Red : Amber);
-    Center(Tutorial ? TEXT("TRAINING") : TimeLow ? TEXT("TIME RUNNING LOW") : TEXT("TIME LEFT"), 26, 14, TimerInk);
-    if (Tutorial) Center(TEXT("NO TIME LIMIT"), 48, 23, TimerInk, true);
-    else
-    {
-        const int Seconds = FMath::Max(0, FMath::CeilToInt(float(S.time)));
-        Center(FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), 37, 44, TimerInk, true);
-    }
+    Center(S.TrafficFrozen() ? TEXT("TIME FROZEN") : TimeLow ? TEXT("TIME RUNNING LOW") : TEXT("TIME LEFT"), 26, 14, TimerInk);
+    const int Seconds = FMath::Max(0, FMath::CeilToInt(float(S.time)));
+    Center(FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), 37, 44, TimerInk, true);
 
     const float InfoX = HudWidth - 388;
     Rect(InfoX, 24, 364, 153, Ink);
     Rect(InfoX, 24, 5, 153, Teal);
-    Text(FString::Printf(TEXT("STAGE %d / 3"), int32(S.Stage())), InfoX + 20, 33, 17, Teal);
+    Text(FString::Printf(TEXT("STAGE %d / 4"), int32(S.Stage())), InfoX + 20, 33, 17, Teal);
     Text(FString::Printf(TEXT("ATTEMPT %d"), S.attempt), InfoX + 244, 35, 15, Muted);
     Text(StageTitle(S.Stage()), InfoX + 20, 54, 27, White);
     if (MultipleOrders)
@@ -689,9 +857,11 @@ void ADeliveryHUD::DrawHUD()
         Text(FString::Printf(TEXT("ORDER %d / %d   TRAFFIC %d / 3"), Order, Delivery::Simulation::DeliveryCount, Order),
             InfoX + 20, 90, 19, Muted);
     }
+    else if(Park) Text(FString::Printf(TEXT("CHECKPOINTS  %d / %d"),int32(S.bridgesCrossed),
+        int32(S.layout->bridgeCheckpoints.size())), InfoX + 20, 90, 19, Muted);
     else Text(TEXT("FOLLOW THE GREEN BEACON"), InfoX + 20, 90, 17, Muted);
     Rect(InfoX + 20, 118, 324, 1, Muted * .44f);
-    Text(FString::Printf(TEXT("%s  %d m"), S.IsClinicDelivery() ? TEXT("CLINIC") : TEXT("DROP"),
+    Text(FString::Printf(TEXT("%s  %d m"), S.HasPendingBridge() ? TEXT("NEXT") : S.IsClinicDelivery() ? TEXT("CLINIC") : TEXT("DROP"),
         FMath::CeilToInt(float(S.DistanceToGoal()))), InfoX + 20, 128, 27, White);
     if (!Tutorial) Text(FString::Printf(TEXT("CASH %d"), S.money), InfoX + 242, 136, 18, Amber);
 
@@ -717,7 +887,7 @@ void ADeliveryHUD::DrawHUD()
         const double Vertical = FMath::Clamp((Limit - X) / (2 * Limit), 0., 1.);
         return FVector2D(MapX + Horizontal * MapSize, MapY + Vertical * MapSize);
     };
-    const auto ParkEdge = MapPoint(Delivery::ParkMinX, 0);
+    const auto ParkEdge = MapPoint(Park?-S.layout->limit:Delivery::ParkMinX, 0);
     Rect(MapX, MapY, MapSize, ParkEdge.Y - MapY, FLinearColor(.12f, .27f, .09f));
     for(const auto& Path:S.layout->paths)
     {
@@ -739,7 +909,8 @@ void ADeliveryHUD::DrawHUD()
         for(int I=0;I<4;++I) DrawLine(Points[I].X*Scale,Points[I].Y*Scale,
             Points[(I+1)%4].X*Scale,Points[(I+1)%4].Y*Scale,Muted*.5f,Scale);
     }
-    FVector2D Goal=MapPoint(S.layout->goal.x,S.layout->goal.y);
+    const auto Target=S.CurrentTarget();
+    FVector2D Goal=MapPoint(Target.x,Target.y);
     Rect(Goal.X-5,Goal.Y-5,10,10,Teal);
     for(const auto& Pickup:S.timePickups)
     {
@@ -763,16 +934,11 @@ void ADeliveryHUD::DrawHUD()
         const float Middle = HudWidth * .5f;
         if(S.TrafficFrozen())
         {
-            Rect(Middle - 157, 105, 314, 37, Ink);
-            Center(FString::Printf(TEXT("TRAFFIC FROZEN   %.1f s"), S.freezeRemaining), 112, 20, Ice);
+            Rect(Middle - 185, 105, 370, 37, Ink);
+            Center(FString::Printf(TEXT("TIMER + ENEMIES FROZEN   %.1f s"), S.freezeRemaining), 112, 20, Ice);
         }
         const float NoticeY = HudHeight - 139;
-        if(Tutorial)
-        {
-            Rect(Middle - 306, NoticeY, 612, 43, Ink);
-            Center(TEXT("PEDAL TO THE GREEN BEACON"), NoticeY + 9, 22, White);
-        }
-        else if(S.deliveryFlash>0)
+        if(S.deliveryFlash>0)
         {
             Rect(Middle - 158, NoticeY, 316, 38, Ink);
             Center(FString::Printf(TEXT("ORDER %d DELIVERED   +%d"), S.deliveriesCompleted,
@@ -784,6 +950,14 @@ void ADeliveryHUD::DrawHUD()
             Center(FString::Printf(TEXT("+%d SECONDS"), Delivery::Simulation::TimePickupBonus), NoticeY + 7, 25, TimerYellow);
         }
         else if(S.restartFlash>0) Center(TEXT("NEW ATTEMPT"), NoticeY + 8, 24, White);
+        else if(Tutorial)
+        {
+            const TCHAR* TipText=S.pickupsCollected==0&&S.freezesCollected==0?TEXT("RIDE OVER THE GOLD TIME COIN"):
+                S.freezesCollected==0?TEXT("PICK UP THE BLUE SNOWFLAKE"):
+                TEXT("DODGE THE CAR AND RIDE TO THE GREEN BEACON");
+            Rect(Middle - 306, NoticeY, 612, 43, Ink);
+            Center(TipText, NoticeY + 9, 20, White);
+        }
         if(S.hitFlash>0) DrawRect(FLinearColor(1,.5f,.2f,float(S.hitFlash)*.15f),0,0,Canvas->SizeX,Canvas->SizeY);
         return;
     }
@@ -805,25 +979,34 @@ void ADeliveryHUD::DrawHUD()
     const TCHAR* Prompt = nullptr;
     if(S.phase==Delivery::Phase::Ready)
     {
-        Center(StageTitle(S.Stage()), DialogY + 24, 40, White, true);
+        Center(Tutorial ? TEXT("HOW TO PLAY") : StageTitle(S.Stage()), DialogY + 24, 40, White, true);
         if(Tutorial)
         {
-            Center(TEXT("Practice pedaling, steering and braking."), DialogY + 96, 22, Muted);
-            Center(TEXT("W pedals, A/D steer, SPACE brakes."), DialogY + 134, 22, White);
-            Center(TEXT("Reach the green beacon to make your first delivery."), DialogY + 172, 21, Muted);
+            Center(TEXT("Deliver to the green beacon before time runs out."), DialogY + 83, 23, White);
+            Center(TEXT("Dodge the cars that chase you."), DialogY + 118, 22, White);
+            Center(FString::Printf(TEXT("Gold time coin adds %d seconds."),Delivery::Simulation::TimePickupBonus), DialogY + 153, 22, Amber);
+            Center(FString::Printf(TEXT("Snowflake freezes the timer and enemies for %.0f seconds."),
+                Delivery::Simulation::FreezeDuration), DialogY + 187, 21, Ice);
+            Center(TEXT("W pedals   A/D steer   SPACE brakes"), DialogY + 221, 19, Muted);
         }
-        else if(FinalStage)
+        else if(Park)
+        {
+            Center(TEXT("Follow the park trails over both wooden bridges."), DialogY + 88, 22, White);
+            Center(TEXT("Pass the green checkpoint on land after each bridge."), DialogY + 128, 21, Muted);
+            Center(FString::Printf(TEXT("Reach the picnic drop within %.0f seconds."),S.layout->timeLimit), DialogY + 168, 21, Muted);
+        }
+        else if(CityRush)
         {
             Center(FString::Printf(TEXT("3 deliveries, %.0f seconds each. Finish at the clinic."), S.layout->timeLimit), DialogY + 88, 21, White);
             Center(TEXT("Dodge faster traffic from the front and rear."), DialogY + 124, 21, Muted);
             Center(TEXT("Earn 100 per order. Retry from the last drop."), DialogY + 160, 21, Muted);
-            Center(TEXT("Alley coins +10s. Snowflakes freeze traffic for 5s."), DialogY + 196, 21, Ice);
+            Center(TEXT("Alley coins +10s. Snowflakes freeze time and enemies for 3s."), DialogY + 196, 20, Ice);
         }
         else
         {
             Center(FString::Printf(TEXT("3 deliveries, %.0f seconds each. Earn 100 per order."), S.layout->timeLimit), DialogY + 88, 21, White);
             Center(TEXT("Swerve to dodge 2–3 cars charging from ahead."), DialogY + 124, 21, Muted);
-            Center(TEXT("Gold clocks +10s. Snowflakes freeze traffic for 5s."), DialogY + 160, 21, Ice);
+            Center(TEXT("Gold coins +10s. Snowflakes freeze time and enemies for 3s."), DialogY + 160, 20, Ice);
             Center(TEXT("Traffic grows with each drop. Retry from the last drop."), DialogY + 196, 20, Muted);
         }
         Prompt = TEXT("PRESS ENTER TO RIDE");
@@ -835,12 +1018,13 @@ void ADeliveryHUD::DrawHUD()
     }
     else if(Delivered)
     {
-        Center(FinalStage ? TEXT("ALL 3 STAGES COMPLETE") : MultipleOrders ? TEXT("THREE DELIVERIES COMPLETE") : TEXT("PARCEL DELIVERED"),
+        Center(Park ? TEXT("ALL 4 STAGES COMPLETE") : MultipleOrders ? TEXT("THREE DELIVERIES COMPLETE") : TEXT("PARCEL DELIVERED"),
             DialogY + 24, 30, Teal, true);
         Center(Tutorial ? TEXT("Riding lesson complete") : FString::Printf(TEXT("%.1f seconds left / %d falls / %d brushes"), S.time, S.falls, S.grazes),
             DialogY + 76, 19, White);
         if(MultipleOrders) Center(FString::Printf(TEXT("3 / 3 DELIVERED   CASH %d"), S.money), DialogY + 108, 20, TimerYellow);
-        Prompt = FinalStage ? TEXT("ENTER TO START A NEW CAMPAIGN") : TEXT("ENTER FOR THE NEXT STAGE");
+        if(Park) Center(FString::Printf(TEXT("BOTH BRIDGES CROSSED   CASH %d"), S.money), DialogY + 108, 20, TimerYellow);
+        Prompt = Park ? TEXT("ENTER TO START A NEW CAMPAIGN") : CityRush ? TEXT("ENTER FOR PARK CROSSING") : TEXT("ENTER FOR THE NEXT STAGE");
     }
     else
     {

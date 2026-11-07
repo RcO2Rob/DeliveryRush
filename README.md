@@ -1,17 +1,22 @@
 # Delivery Rush
 
+The courier uses Quaternius's [Casual Hoodie character](https://quaternius.com/packs/ultimatemodularcharacters.html) (CC0), adapted for cycling.
+Traffic uses two models from Quaternius's [Cars Pack](https://quaternius.com/packs/cars.html) (CC0).
+
 Ride a bicycle across a rolling 3D city and park and deliver an urgent parcel before the
 per-order deadline. The campaign has one teaching delivery followed by three
 deliveries in each of stages two and three; the last stop is the clinic.
+The teaching delivery has a 60-second timer, one slower car, a time coin and a snowflake on the starting street.
+Stage four opens the separate `DeliveryPark` map. Cross two wooden bridges, pass the green checkpoint on land after each bridge, and reach the picnic drop within 60 seconds.
+Park pursuers cruise at up to 29 m/s and brake for obstacles and tight bridge approaches.
 Each paid order earns 100 cash and retries preserve completed orders. Traffic
 gets faster and more frequent with each delivery, with a higher simultaneous
 vehicle limit. Stage two allows 60 seconds per order and only one-pass traffic
 from ahead. Stage three allows 60 seconds per order and adds rear pursuit.
 Each stage-two order has at most one clock (+10 seconds) and one snowflake;
 stage-three orders have up to two separated alley coins (+10 seconds each)
-and one snowflake. Snowflakes stop cars,
-pedestrians and new traffic for five seconds while cycling and the deadline
-continue. Pickups do not respawn during an order.
+and one snowflake. Snowflakes pause the deadline, cars, pedestrians and new traffic for three seconds while the player keeps cycling. Pickups do not respawn during an order.
+Sidewalk pedestrians in stages two and three have solid bicycle contact. A bump slows and nudges the rider away.
 Choose streets, turn at intersections, take an alley or
 turn back. Incoming cars try to ram the courier and keep pursuing after a miss.
 After a miss, the same car brakes, recovers behind the rider and accelerates

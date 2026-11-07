@@ -17,6 +17,7 @@ struct LevelLayout
 {
     std::vector<Building> obstacles;
     std::vector<Vec2> nodes, spawnPoints;
+    std::vector<Vec2> bridgeCheckpoints;
     std::vector<PathSegment> paths;
     std::vector<std::vector<double>> edges;
     Vec2 start{StartX,StartY}, goal{DestinationX,DestinationY};
