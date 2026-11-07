@@ -1,0 +1,8 @@
+{
+  "map": "/Game/Maps/DeliveryEditable",
+  "schema": 5,
+  "source_map_preserved": "/Game/Maps/DeliveryHills",
+  "layout_sha256": "a2776c9d6cf967af856919b92dfe4390999199e36f9c0f6139cf5580354be673",
+  "runtime_layout": "Actual level actors and terrain collision",
+  "merged_decorations": 316
+}

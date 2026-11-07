@@ -1,0 +1,4 @@
+Design/city_layout.json -text
+*.command text eol=lf
+*.uasset binary
+*.umap binary
