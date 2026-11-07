@@ -459,6 +459,8 @@ int main()
     Run(campaign,.28,{1,-1,false});
     Run(campaign,8,{1,0,false});
     Require(campaign.phase==Phase::Delivered,"A new rider can steer around the practice car and finish the lesson");
+    Require(!campaign.TickStageTransition(1.5)&&campaign.nextStageIn==.5&&campaign.TickStageTransition(.5)&&
+        !campaign.TickStageTransition(.5),"The teaching result holds for two seconds and requests the next stage once");
     campaign.AdvanceStage();
     Require(campaign.Stage()==CampaignStage::FirstChase&&campaign.phase==Phase::Ready&&campaign.time==60,
         "Finishing the lesson unlocks the timed first chase");
@@ -662,6 +664,7 @@ int main()
     }
     Require(campaign.phase==Phase::Delivered&&campaign.money==300,
         "The stage ends after three deliveries and awards three payments");
+    Require(campaign.TickStageTransition(Simulation::StageTransitionDelay),"The second-stage result also advances automatically");
 
     auto orders=retry;
     NoSpawn(orders);
@@ -784,8 +787,12 @@ int main()
     Require(finalOrders.phase==Phase::Delivered&&finalOrders.money==600,
         "Replaying the final clinic cannot duplicate its reward");
     campaign=finalOrders;
+    Require(campaign.TickStageTransition(Simulation::StageTransitionDelay)&&!campaign.TickStageTransition(.5),
+        "The city finale requests the park map exactly once after the result delay");
     campaign.AdvanceStage();
+    Require(campaign.Stage()==CampaignStage::CityRush&&campaign.money==600,"City-to-park travel preserves the result until the new map loads");
+    campaign.BeginCampaign(city);
     Require(campaign.Stage()==CampaignStage::Tutorial&&campaign.phase==Phase::Ready&&campaign.ActiveCars()==0&&campaign.money==0,
-        "Completing the final delivery can start a fresh campaign");
+        "A new campaign clears earlier rewards and starts at the lesson");
     std::cout<<"DELIVERY_CITY_CHECKS_PASSED: "<<Checks<<'\n';
 }

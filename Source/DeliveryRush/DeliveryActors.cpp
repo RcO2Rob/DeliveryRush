@@ -2,15 +2,18 @@
 #include "DeliveryLevel.h"
 #include "Animation/AnimSequence.h"
 #include "CanvasItem.h"
+#include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/AudioComponent.h"
 #include "Components/PoseableMeshComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/PointLight.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -19,6 +22,7 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/App.h"
 #include "Sound/SoundBase.h"
@@ -534,7 +538,10 @@ void ADeliveryGameMode::BeginPlay()
     Attenuation.FalloffDistance = 9000.f;
     const auto Level=Delivery::ReadLevelLayout(GetWorld());
     if(!Level->bridgeCheckpoints.empty())
+    {
         Ride.BeginPark(Level,FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString,TEXT("Cash"),0),0,600));
+        bStartParkOnArrival=UGameplayStatics::HasOption(OptionsString,TEXT("AutoStart"));
+    }
     else Ride.BeginCampaign(Level);
     for(TActorIterator<ADeliveryLevelSettings> It(GetWorld());It;++It)
     {
@@ -549,27 +556,134 @@ void ADeliveryGameMode::BeginPlay()
         Rider = GetWorld()->SpawnActor<ADeliveryBike>();
         if (PC) PC->Possess(Rider);
     }
-    if (PC)
-    {
-        PC->SetViewTarget(Rider);
-        UpdateMouseInput(*PC);
-    }
     Cars.SetNumZeroed(int32(Delivery::Simulation::CarCount));
     TimePickupActors.SetNumZeroed(int32(Delivery::Simulation::TimePickupCount));
     FreezePickupActors.SetNumZeroed(int32(Delivery::Simulation::FreezePickupCount));
     if (Rider) Rider->Present(Ride, 0);
+    if(PC&&Rider)
+    {
+        PC->SetViewTarget(Rider);
+        if(Ride.Stage()==Delivery::CampaignStage::Tutorial) ShowMainMenu(*PC);
+        UpdateMouseInput(*PC);
+    }
     UE_LOG(LogTemp, Display, TEXT("DELIVERY_RUSH_READY: press Enter to ride."));
+}
+void ADeliveryGameMode::ShowMainMenu(APlayerController& Controller)
+{
+    const auto Forward=Delivery::Simulation::Forward(Ride.heading);
+    const Delivery::Vec2 Side{-Forward.y,Forward.x};
+    auto Preview=Ride;
+    Preview.bike=Ride.bike+Forward*94+Side*90;
+    if(Ride.IsBlocked(Preview.bike,2.5)) Preview.bike=Ride.bike+Forward*15;
+    Preview.phase=Delivery::Phase::Riding;
+    Preview.speed=8.5;
+    Preview.steering=-.14;
+    Rider->Present(Preview,.22f,true);
+
+    const FVector Front(Forward.x,Forward.y,0), Right(Side.x,Side.y,0);
+    const FVector Origin=Rider->GetActorLocation();
+    const FVector CameraPosition=Origin+Front*610-Right*110+FVector(0,0,145);
+    const FVector LookAt=Origin+Right*225+FVector(0,0,100);
+    MenuCamera=GetWorld()->SpawnActor<ACameraActor>(CameraPosition,(LookAt-CameraPosition).Rotation());
+    if(!MenuCamera) { Rider->Present(Ride,0); return; }
+    MenuCamera->GetCameraComponent()->SetConstraintAspectRatio(false);
+    MenuCamera->GetCameraComponent()->SetFieldOfView(64);
+    Controller.SetViewTarget(MenuCamera);
+    if(PracticeGoal) PracticeGoal->SetActorHiddenInGame(true);
+
+    MenuFill=GetWorld()->SpawnActor<APointLight>(Origin+Front*235-Right*145+FVector(0,0,255),FRotator::ZeroRotator);
+    if(MenuFill)
+    {
+        auto* Light=MenuFill->FindComponentByClass<UPointLightComponent>();
+        Light->SetMobility(EComponentMobility::Movable);
+        Light->SetIntensityUnits(ELightUnits::Lumens);
+        Light->SetIntensity(1200);
+        Light->SetAttenuationRadius(550);
+        Light->SetLightColor(FLinearColor(1,.89f,.75f));
+        Light->SetCastShadows(false);
+    }
+
+    for(int32 Index=0;Index<2;++Index)
+    {
+        Delivery::Car Pose;
+        Pose.identity=Index+1;
+        Pose.phase=Delivery::CarPhase::Pursuing;
+        Pose.position=Preview.bike-Forward*(7+Index*8)+Side*(Index==0?4.9:-.4);
+        const auto ToRider=Preview.bike-Pose.position;
+        Pose.heading=std::atan2(ToRider.y,ToRider.x);
+        if(auto* Car=GetWorld()->SpawnActor<ADeliveryCar>())
+        {
+            Car->Present(Pose,Ride.layout.get());
+            MenuCars.Add(Car);
+        }
+    }
+}
+void ADeliveryGameMode::CloseMainMenu(APlayerController& Controller)
+{
+    Rider->Present(Ride,0);
+    Controller.SetViewTarget(Rider);
+    MenuCamera->Destroy();
+    MenuCamera=nullptr;
+    if(MenuFill) MenuFill->Destroy();
+    MenuFill=nullptr;
+    bMenuRules=false;
+    for(auto* Car:MenuCars) Car->Destroy();
+    MenuCars.Reset();
+    UpdateGoalMarker();
+    UpdatePickups();
+    UpdateMouseInput(Controller);
+}
+void ADeliveryGameMode::HandleMenuAction(FName Action)
+{
+    auto* PC=GetWorld()->GetFirstPlayerController();
+    if(!PC||!Rider) return;
+    if(IsShowingMenu())
+    {
+        if(Action==TEXT("StartGame")&&!bMenuRules) CloseMainMenu(*PC);
+        else if(Action==TEXT("HowToPlay")) bMenuRules=true;
+        else if(Action==TEXT("Back")) bMenuRules=false;
+        else if(Action==TEXT("QuitGame")&&!bMenuRules) UKismetSystemLibrary::QuitGame(this,PC,EQuitPreference::Quit,false);
+    }
+    else if(Action==TEXT("StartRide")&&Ride.phase==Delivery::Phase::Ready)
+    {
+        bStartParkOnArrival=false;
+        Ride.Start();
+        UpdateMouseInput(*PC);
+        UpdateMusic();
+    }
+    else if(Action==TEXT("MainMenu")&&Ride.phase==Delivery::Phase::Delivered&&Ride.Stage()==Delivery::CampaignStage::ParkCrossing)
+        UGameplayStatics::OpenLevel(this,TEXT("/Game/Maps/DeliveryEditable"));
+}
+void ADeliveryGameMode::AdvanceAfterDelivery(APlayerController& Controller)
+{
+    if(Ride.Stage()==Delivery::CampaignStage::CityRush)
+    {
+        UGameplayStatics::OpenLevel(this,TEXT("/Game/Maps/DeliveryPark"),true,FString::Printf(TEXT("Cash=%d?AutoStart"),Ride.money));
+        return;
+    }
+    Ride.AdvanceStage();
+    Ride.Start();
+    UpdateGoalMarker();
+    SetUpPedestrians();
+    Rider->Present(Ride,0);
+    UpdatePickups();
+    UpdateMouseInput(Controller);
+    UpdateMusic();
 }
 void ADeliveryGameMode::UpdateMouseInput(APlayerController& Controller) const
 {
     Controller.bShowMouseCursor=true;
+    const bool Clickable=Ride.phase==Delivery::Phase::Ready||
+        (Ride.phase==Delivery::Phase::Delivered&&Ride.Stage()==Delivery::CampaignStage::ParkCrossing);
+    Controller.bEnableClickEvents=Clickable;
     FInputModeGameAndUI Mode;
     Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-    Mode.SetHideCursorDuringCapture(true);
+    Mode.SetHideCursorDuringCapture(!Clickable);
     Controller.SetInputMode(Mode);
     if(auto* Viewport=GetWorld()->GetGameViewport())
         Viewport->SetMouseCaptureMode(Ride.phase==Delivery::Phase::Riding
-            ? EMouseCaptureMode::CaptureDuringRightMouseDown : EMouseCaptureMode::NoCapture);
+            ? EMouseCaptureMode::CaptureDuringRightMouseDown
+            : Clickable ? EMouseCaptureMode::CaptureDuringMouseDown : EMouseCaptureMode::NoCapture);
 }
 void ADeliveryGameMode::UpdateGoalMarker()
 {
@@ -669,28 +783,29 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
     Super::Tick(DeltaSeconds);
     auto* PC=GetWorld()->GetFirstPlayerController();
     if(!PC||!Rider) return;
+    if(IsShowingMenu())
+    {
+        if(bMenuRules&&PC->WasInputKeyJustPressed(EKeys::Escape)) HandleMenuAction(TEXT("Back"));
+        else if(PC->WasInputKeyJustPressed(EKeys::Enter)&&!bMenuRules) HandleMenuAction(TEXT("StartGame"));
+        return;
+    }
+    if(FApp::HasFocus()&&Ride.TickStageTransition(DeltaSeconds))
+    {
+        AdvanceAfterDelivery(*PC);
+        return;
+    }
     const bool WasRiding=Ride.phase==Delivery::Phase::Riding;
     const auto PreviousBridges=Ride.bridgesCrossed;
-    if(PC->WasInputKeyJustPressed(EKeys::R)) Ride.Restart();
+    if(bStartParkOnArrival&&FApp::HasFocus()) { bStartParkOnArrival=false; Ride.Start(); }
+    if(PC->WasInputKeyJustPressed(EKeys::R)&&Ride.phase!=Delivery::Phase::Ready&&Ride.phase!=Delivery::Phase::Delivered) Ride.Restart();
     if(PC->WasInputKeyJustPressed(EKeys::Enter))
     {
         if(Ride.phase==Delivery::Phase::Ready) Ride.Start();
         else if(Ride.phase==Delivery::Phase::Failed) Ride.Restart();
-        else if(Ride.phase==Delivery::Phase::Delivered)
+        else if(Ride.phase==Delivery::Phase::Delivered&&Ride.Stage()==Delivery::CampaignStage::ParkCrossing)
         {
-            if(Ride.Stage()==Delivery::CampaignStage::CityRush)
-            {
-                UGameplayStatics::OpenLevel(this,TEXT("/Game/Maps/DeliveryPark"),true,FString::Printf(TEXT("Cash=%d"),Ride.money));
-                return;
-            }
-            if(Ride.Stage()==Delivery::CampaignStage::ParkCrossing)
-            {
-                UGameplayStatics::OpenLevel(this,TEXT("/Game/Maps/DeliveryEditable"));
-                return;
-            }
-            Ride.AdvanceStage();
-            UpdateGoalMarker();
-            SetUpPedestrians();
+            HandleMenuAction(TEXT("MainMenu"));
+            return;
         }
         else if(Ride.phase==Delivery::Phase::Paused) Ride.TogglePause();
     }
@@ -821,6 +936,73 @@ void ADeliveryHUD::Center(const FString& Value, float Y, float Size, FLinearColo
 {
     Text(Value, HudWidth * .5f, Y, Size, Color, true, Italic);
 }
+void ADeliveryHUD::NotifyHitBoxClick(FName BoxName)
+{
+    Super::NotifyHitBoxClick(BoxName);
+    PressedButton=BoxName;
+}
+void ADeliveryHUD::NotifyHitBoxRelease(FName BoxName)
+{
+    Super::NotifyHitBoxRelease(BoxName);
+    if(PressedButton!=BoxName) return;
+    PressedButton=NAME_None;
+    if(auto* Mode=Cast<ADeliveryGameMode>(GetWorld()->GetAuthGameMode())) Mode->HandleMenuAction(BoxName);
+}
+void ADeliveryHUD::NotifyHitBoxEndCursorOver(FName BoxName)
+{
+    Super::NotifyHitBoxEndCursorOver(BoxName);
+    if(PressedButton==BoxName) PressedButton=NAME_None;
+}
+void ADeliveryHUD::Button(FName Name,const TCHAR* Label,float X,float Y,float Width,float Height,bool Primary)
+{
+    const bool Hovered=HitBoxesOver.Contains(Name);
+    const FLinearColor Background=Primary?(Hovered?White:TimerYellow):
+        (Hovered?FLinearColor(.14f,.25f,.29f):FLinearColor(.07f,.12f,.17f));
+    Rect(X,Y,Width,Height,Background);
+    Rect(X,Y,4,Height,Primary?Amber:Teal);
+    Text(Label,X+Width*.5f,Y+(Height-27)*.5f,23,Primary?TimerInk:White,true);
+    AddHitBox(FVector2D(X*Scale,Y*Scale),FVector2D(Width*Scale,Height*Scale),Name,true);
+}
+void ADeliveryHUD::DrawRideRules(float DialogY)
+{
+    Center(TEXT("HOW TO PLAY"), DialogY + 24, 40, White, true);
+    Center(TEXT("Deliver to the green beacon before time runs out."), DialogY + 83, 23, White);
+    Center(TEXT("Dodge the cars that chase you."), DialogY + 118, 22, White);
+    Center(FString::Printf(TEXT("Gold time coin adds %d seconds."),Delivery::Simulation::TimePickupBonus), DialogY + 153, 22, Amber);
+    Center(FString::Printf(TEXT("Snowflake freezes the timer and enemies for %.0f seconds."),
+        Delivery::Simulation::FreezeDuration), DialogY + 187, 21, Ice);
+    Center(TEXT("W pedals   A/D steer   SPACE brakes"), DialogY + 221, 19, Muted);
+}
+void ADeliveryHUD::DrawMainMenu(bool Rules)
+{
+    const float Top=(HudHeight-720)*.5f;
+    const FLinearColor Panel(.018f,.032f,.050f,.98f);
+    Rect(0,0,HudWidth,HudHeight,FLinearColor(.025f,.04f,.065f,.10f));
+    Rect(0,0,450,HudHeight,Panel);
+    for(int32 Band=0;Band<20;++Band)
+        Rect(450+Band*7,0,7,HudHeight,FLinearColor(Panel.R,Panel.G,Panel.B,.89f*(1.f-Band/20.f)));
+    Rect(0,0,HudWidth,5,TimerYellow);
+    Rect(48,Top+74,39,4,Teal);
+    Text(TEXT("BICYCLE DELIVERY"),100,Top+64,18,Teal);
+    Text(TEXT("DELIVERY"),42,Top+105,84,White,false,true);
+    Text(TEXT("RUSH"),44,Top+187,119,TimerYellow,false,true);
+    Text(TEXT("Ride hard. Deliver on time."),49,Top+318,23,White);
+    Text(TEXT("4 STAGES  /  CITY & PARK"),49,Top+357,16,Muted);
+    if(Rules)
+    {
+        Rect(0,0,HudWidth,HudHeight,FLinearColor(0,0,0,.45f));
+        const float DialogY=(HudHeight-324)*.5f;
+        Rect((HudWidth-740)*.5f,DialogY,740,324,Panel);
+        Rect((HudWidth-740)*.5f,DialogY,740,5,TimerYellow);
+        DrawRideRules(DialogY);
+        Button(TEXT("Back"),TEXT("BACK TO MENU"),(HudWidth-320)*.5f,DialogY+255,320,47,true);
+        return;
+    }
+    Button(TEXT("StartGame"),TEXT("START GAME"),48,Top+419,326,57,true);
+    Button(TEXT("HowToPlay"),TEXT("HOW TO PLAY"),48,Top+489,326,49,false);
+    Button(TEXT("QuitGame"),TEXT("QUIT GAME"),48,Top+550,326,49,false);
+    Text(TEXT("ENTER TO START"),49,Top+645,16,Muted);
+}
 void ADeliveryHUD::DrawHUD()
 {
     Super::DrawHUD();
@@ -836,6 +1018,7 @@ void ADeliveryHUD::DrawHUD()
     if (Scale <= 0) return;
     HudWidth = Canvas->SizeX / Scale;
     HudHeight = Canvas->SizeY / Scale;
+    if(Mode->IsShowingMenu()) { DrawMainMenu(Mode->IsShowingMenuRules()); return; }
 
     const float TimerX = HudWidth * .5f - 90;
     const bool TimeLow = !S.TrafficFrozen() && S.time < 20;
@@ -976,18 +1159,13 @@ void ADeliveryHUD::DrawHUD()
     }
     Rect(DialogX, DialogY, DialogWidth, DialogHeight, FLinearColor(.02f, .035f, .055f, .97f));
     Rect(DialogX, DialogY, DialogWidth, 5, TimerYellow);
-    const TCHAR* Prompt = nullptr;
+    FString Prompt;
     if(S.phase==Delivery::Phase::Ready)
     {
-        Center(Tutorial ? TEXT("HOW TO PLAY") : StageTitle(S.Stage()), DialogY + 24, 40, White, true);
+        if(!Tutorial) Center(StageTitle(S.Stage()), DialogY + 24, 40, White, true);
         if(Tutorial)
         {
-            Center(TEXT("Deliver to the green beacon before time runs out."), DialogY + 83, 23, White);
-            Center(TEXT("Dodge the cars that chase you."), DialogY + 118, 22, White);
-            Center(FString::Printf(TEXT("Gold time coin adds %d seconds."),Delivery::Simulation::TimePickupBonus), DialogY + 153, 22, Amber);
-            Center(FString::Printf(TEXT("Snowflake freezes the timer and enemies for %.0f seconds."),
-                Delivery::Simulation::FreezeDuration), DialogY + 187, 21, Ice);
-            Center(TEXT("W pedals   A/D steer   SPACE brakes"), DialogY + 221, 19, Muted);
+            DrawRideRules(DialogY);
         }
         else if(Park)
         {
@@ -1009,7 +1187,8 @@ void ADeliveryHUD::DrawHUD()
             Center(TEXT("Gold coins +10s. Snowflakes freeze time and enemies for 3s."), DialogY + 160, 20, Ice);
             Center(TEXT("Traffic grows with each drop. Retry from the last drop."), DialogY + 196, 20, Muted);
         }
-        Prompt = TEXT("PRESS ENTER TO RIDE");
+        Button(TEXT("StartRide"),TEXT("START RIDING   /   ENTER"),(HudWidth-460)*.5f,DialogY+252,460,47,true);
+        return;
     }
     else if(S.phase==Delivery::Phase::Paused)
     {
@@ -1024,15 +1203,24 @@ void ADeliveryHUD::DrawHUD()
             DialogY + 76, 19, White);
         if(MultipleOrders) Center(FString::Printf(TEXT("3 / 3 DELIVERED   CASH %d"), S.money), DialogY + 108, 20, TimerYellow);
         if(Park) Center(FString::Printf(TEXT("BOTH BRIDGES CROSSED   CASH %d"), S.money), DialogY + 108, 20, TimerYellow);
-        Prompt = Park ? TEXT("ENTER TO START A NEW CAMPAIGN") : CityRush ? TEXT("ENTER FOR PARK CROSSING") : TEXT("ENTER FOR THE NEXT STAGE");
+        if(Park)
+            Button(TEXT("MainMenu"),TEXT("MAIN MENU"),(HudWidth-376)*.5f,DialogY+151,376,39,true);
+        else
+        {
+            const auto NextStage=static_cast<Delivery::CampaignStage>(int32(S.Stage())+1);
+            const float Progress=1.f-float(S.nextStageIn/Delivery::Simulation::StageTransitionDelay);
+            Center(FString::Printf(TEXT("%s  IN  %d"),StageTitle(NextStage),FMath::CeilToInt(S.nextStageIn)),DialogY+145,19,White);
+            Rect((HudWidth-376)*.5f,DialogY+177,376,5,Muted*.4f);
+            Rect((HudWidth-376)*.5f,DialogY+177,376*Progress,5,TimerYellow);
+        }
+        return;
     }
     else
     {
         Center(TEXT("DELIVERY TOO LATE"), DialogY + 88, 43, Red, true);
         Prompt = MultipleOrders ? TEXT("ENTER / R TO RETRY THIS ORDER") : TEXT("ENTER / R TO RETRY THIS STAGE");
     }
-    const float ButtonWidth = Delivered ? 376.f : 460.f;
-    const float ButtonY = DialogY + (Delivered ? 151.f : 252.f);
-    Rect((HudWidth - ButtonWidth) * .5f, ButtonY, ButtonWidth, Delivered ? 39.f : 47.f, TimerYellow);
-    Center(Prompt, ButtonY + 9, Delivered ? 19.f : 23.f, TimerInk);
+    const float ButtonY = DialogY+252;
+    Rect((HudWidth-460)*.5f,ButtonY,460,47,TimerYellow);
+    Center(Prompt,ButtonY+9,23,TimerInk);
 }

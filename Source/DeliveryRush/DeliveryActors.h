@@ -13,6 +13,8 @@ class UPoseableMeshComponent;
 class USkeletalMeshComponent;
 class UAnimSequence;
 class UCameraComponent;
+class ACameraActor;
+class APointLight;
 class USpringArmComponent;
 class APlayerController;
 class UAudioComponent;
@@ -115,6 +117,9 @@ public:
     Delivery::Simulation Ride;
     UFUNCTION(BlueprintPure, Category="Delivery")
     FString GetRideStatus() const;
+    bool IsShowingMenu() const { return MenuCamera!=nullptr; }
+    bool IsShowingMenuRules() const { return bMenuRules; }
+    void HandleMenuAction(FName Action);
 private:
     UPROPERTY() ADeliveryBike* Rider;
     UPROPERTY() TArray<ADeliveryCar*> Cars;
@@ -125,7 +130,15 @@ private:
     UPROPERTY() TArray<ADeliveryPedestrian*> Pedestrians;
     UPROPERTY() UAudioComponent* MusicComponent = nullptr;
     UPROPERTY() USoundAttenuation* TrafficImpactAttenuation = nullptr;
+    UPROPERTY() ACameraActor* MenuCamera = nullptr;
+    UPROPERTY() APointLight* MenuFill = nullptr;
+    UPROPERTY() TArray<ADeliveryCar*> MenuCars;
     bool PedestrianRefreshPending=false;
+    bool bMenuRules=false;
+    bool bStartParkOnArrival=false;
+    void ShowMainMenu(APlayerController& Controller);
+    void CloseMainMenu(APlayerController& Controller);
+    void AdvanceAfterDelivery(APlayerController& Controller);
     void UpdateGoalMarker();
     void UpdatePickups();
     void SetUpPedestrians();
@@ -141,10 +154,17 @@ class DELIVERYRUSH_API ADeliveryHUD : public AHUD
     GENERATED_BODY()
 public:
     virtual void DrawHUD() override;
+    virtual void NotifyHitBoxClick(FName BoxName) override;
+    virtual void NotifyHitBoxRelease(FName BoxName) override;
+    virtual void NotifyHitBoxEndCursorOver(FName BoxName) override;
 private:
+    FName PressedButton;
     float Scale = 1, HudWidth = 1280, HudHeight = 720;
     void Rect(float X, float Y, float W, float H, FLinearColor Color);
     void Text(const FString& Value, float X, float Y, float Size, FLinearColor Color,
         bool Centered = false, bool Italic = false);
     void Center(const FString& Value, float Y, float Size, FLinearColor Color, bool Italic = false);
+    void Button(FName Name,const TCHAR* Label,float X,float Y,float Width,float Height,bool Primary);
+    void DrawRideRules(float DialogY);
+    void DrawMainMenu(bool Rules);
 };

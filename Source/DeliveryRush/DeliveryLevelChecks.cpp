@@ -152,6 +152,7 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
         Ride.Tick(.01,{0,0,true});
         TestTrue(TEXT("After both crossings the park delivery pays and completes the campaign"),
             Ride.phase==Delivery::Phase::Delivered&&Ride.money==700&&Ride.ActiveCars()==0);
+        TestFalse(TEXT("The campaign result remains open after the park delivery"),Ride.TickStageTransition(10));
         Ride.Restart();
         TestTrue(TEXT("Retry cannot pay the completed park delivery twice"),Ride.phase==Delivery::Phase::Delivered&&Ride.money==700);
         return !HasAnyErrors();

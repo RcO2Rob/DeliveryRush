@@ -67,6 +67,7 @@ struct Simulation
     static constexpr std::size_t TimePickupCount = 2;
     static constexpr std::size_t FreezePickupCount = 1;
     static constexpr double FreezeDuration = 3;
+    static constexpr double StageTransitionDelay = 2;
     static constexpr int TimePickupBonus = 10;
     static constexpr double OncomingSpeed = 17;
     static constexpr double CityCruiseSpeed = 21;
@@ -94,6 +95,7 @@ struct Simulation
     int deliveriesCompleted = 0, money = 0;
     std::size_t bridgesCrossed = 0;
     double deliveryFlash = 0;
+    double nextStageIn = 0;
 
     std::shared_ptr<const LevelLayout> layout;
     Simulation();
@@ -102,6 +104,7 @@ struct Simulation
     void BeginCampaign(std::shared_ptr<const LevelLayout> level);
     void BeginPark(std::shared_ptr<const LevelLayout> level,int carriedMoney);
     void AdvanceStage();
+    bool TickStageTransition(double dt);
     CampaignStage Stage() const { return stage; }
     bool TrafficFrozen() const { return freezeRemaining>1e-8; }
     bool HasPendingBridge() const { return stage==CampaignStage::ParkCrossing&&bridgesCrossed<layout->bridgeCheckpoints.size(); }

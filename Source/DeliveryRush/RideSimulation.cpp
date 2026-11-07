@@ -86,9 +86,15 @@ void Simulation::AdvanceStage()
     {
         case CampaignStage::Tutorial: LoadStage(CampaignStage::FirstChase); break;
         case CampaignStage::FirstChase: LoadStage(CampaignStage::CityRush); break;
-        case CampaignStage::CityRush: LoadStage(CampaignStage::Tutorial); break;
+        case CampaignStage::CityRush:
         case CampaignStage::ParkCrossing: break;
     }
+}
+bool Simulation::TickStageTransition(double dt)
+{
+    if(phase!=Phase::Delivered||nextStageIn<=0||!std::isfinite(dt)||dt<=0) return false;
+    nextStageIn=std::max(0.0,nextStageIn-dt);
+    return nextStageIn==0;
 }
 void Simulation::LoadStage(CampaignStage nextStage)
 {
@@ -192,7 +198,7 @@ void Simulation::Reset()
     }
     timePickups={}; pickupsCollected=0; timePickupFlash=0;
     freezePickups={}; freezeRemaining=trafficElapsed=0; freezesCollected=0;
-    deliveryFlash=0;
+    deliveryFlash=nextStageIn=0;
     if(stage==CampaignStage::Tutorial)
     {
         const Vec2 route=layout->goal-layout->start;
@@ -379,6 +385,7 @@ void Simulation::Tick(double dt,const Input& input)
         }
         else Step(step,input);
     }
+    if(phase==Phase::Delivered&&stage!=CampaignStage::ParkCrossing) nextStageIn=StageTransitionDelay;
 }
 void Simulation::Step(double dt,const Input& input)
 {

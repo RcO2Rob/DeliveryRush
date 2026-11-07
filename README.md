@@ -55,7 +55,7 @@ moved, rotated, scaled, duplicated or deleted; gameplay reads their collidable
 mesh bounds on each Play. Roads use editable splines, and hill actors control
 the terrain. See [地图编辑指南](地图编辑指南.md).
 
-Double-click **Play Demo.command**, click the game window and press **Enter**.
+Double-click **Play Demo.command**, choose **Start Game**, then select **Start Riding** on the rules panel. Cleared stages show results for two seconds before the next stage starts. The final result stays open until you return to the main menu.
 Use **Open Demo.command** to edit the native city/park map in Unreal.
 
 | Key | Action |
