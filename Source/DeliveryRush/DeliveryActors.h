@@ -12,6 +12,8 @@ class UStaticMeshComponent;
 class UCameraComponent;
 class USpringArmComponent;
 class APlayerController;
+class UAudioComponent;
+class USoundAttenuation;
 
 UCLASS()
 class DELIVERYRUSH_API ADeliveryGoalMarker : public AActor
@@ -78,11 +80,16 @@ class DELIVERYRUSH_API ADeliveryCar : public AActor
 public:
     ADeliveryCar();
     void Present(const Delivery::Car& State, const Delivery::LevelLayout* Level=nullptr);
+    void UpdateAudio(const Delivery::Car& State, bool Audible, float DeltaSeconds);
 private:
     UPROPERTY() USceneComponent* Body;
     UPROPERTY() UStaticMeshComponent* Chassis;
     UPROPERTY() UStaticMeshComponent* Roof;
+    UPROPERTY() UAudioComponent* EngineAudio;
+    UPROPERTY() UAudioComponent* BrakeAudio;
     int PaintedIdentity = 0;
+    float PreviousAudioSpeed = 0.f;
+    float BrakeCooldown = 0.f;
 };
 
 UCLASS()
@@ -104,11 +111,15 @@ private:
     UPROPERTY() TArray<ADeliveryTimePickup*> TimePickupActors;
     UPROPERTY() TArray<ADeliveryFreezePickup*> FreezePickupActors;
     UPROPERTY() TArray<ADeliveryPedestrian*> Pedestrians;
+    UPROPERTY() UAudioComponent* MusicComponent = nullptr;
+    UPROPERTY() USoundAttenuation* TrafficImpactAttenuation = nullptr;
     bool PedestrianRefreshPending=false;
     void UpdateGoalMarker();
     void UpdatePickups();
     void SetUpPedestrians();
     void UpdateMouseInput(APlayerController& Controller) const;
+    void UpdateMusic();
+    void PlayTrafficImpact();
     void PlayCue(const TCHAR* Name, float Volume = .5f);
 };
 
@@ -119,8 +130,9 @@ class DELIVERYRUSH_API ADeliveryHUD : public AHUD
 public:
     virtual void DrawHUD() override;
 private:
-    float Scale = 1, OffsetX = 0, OffsetY = 0;
+    float Scale = 1, HudWidth = 1280, HudHeight = 720;
     void Rect(float X, float Y, float W, float H, FLinearColor Color);
-    void Text(const FString& Value, float X, float Y, float Size, FLinearColor Color);
-    void Center(const FString& Value, float Y, float Size, FLinearColor Color);
+    void Text(const FString& Value, float X, float Y, float Size, FLinearColor Color,
+        bool Centered = false, bool Italic = false);
+    void Center(const FString& Value, float Y, float Size, FLinearColor Color, bool Italic = false);
 };

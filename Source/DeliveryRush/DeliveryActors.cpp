@@ -1,6 +1,8 @@
 #include "DeliveryActors.h"
 #include "DeliveryLevel.h"
+#include "CanvasItem.h"
 #include "Camera/CameraComponent.h"
+#include "Components/AudioComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Canvas.h"
@@ -16,6 +18,8 @@
 #include "Materials/MaterialInterface.h"
 #include "Misc/App.h"
 #include "Sound/SoundBase.h"
+#include "Sound/SoundAttenuation.h"
+#include "Styling/CoreStyle.h"
 #include <cmath>
 
 namespace
@@ -27,14 +31,16 @@ const FLinearColor Teal(.19f, .94f, .73f);
 const FLinearColor Amber(1.f, .68f, .18f);
 const FLinearColor Red(1.f, .24f, .23f);
 const FLinearColor Ice(.42f, .87f, 1.f);
+const FLinearColor TimerYellow(1.f, .76f, .095f);
+const FLinearColor TimerInk(.035f, .027f, .014f);
 
 const TCHAR* StageTitle(Delivery::CampaignStage Stage)
 {
     switch(Stage)
     {
-        case Delivery::CampaignStage::Tutorial: return TEXT("1 / 3   RIDING LESSON");
-        case Delivery::CampaignStage::FirstChase: return TEXT("2 / 3   ONCOMING TRAFFIC");
-        case Delivery::CampaignStage::CityRush: return TEXT("3 / 3   CITY RUSH");
+        case Delivery::CampaignStage::Tutorial: return TEXT("RIDING LESSON");
+        case Delivery::CampaignStage::FirstChase: return TEXT("ONCOMING TRAFFIC");
+        case Delivery::CampaignStage::CityRush: return TEXT("CITY RUSH");
     }
     return TEXT("DELIVERY RUSH");
 }
@@ -282,6 +288,23 @@ ADeliveryCar::ADeliveryCar()
 {
     PrimaryActorTick.bCanEverTick = false;
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+    EngineAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("EngineAudio"));
+    BrakeAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("BrakeAudio"));
+    for (auto* Audio : {EngineAudio, BrakeAudio})
+    {
+        Audio->SetupAttachment(RootComponent);
+        Audio->SetRelativeLocation(FVector(0, 0, 65));
+        Audio->SetAutoActivate(false);
+        Audio->bOverrideAttenuation = true;
+        Audio->AttenuationOverrides.bAttenuate = true;
+        Audio->AttenuationOverrides.bSpatialize = true;
+        Audio->AttenuationOverrides.DistanceAlgorithm = EAttenuationDistanceModel::Linear;
+        Audio->AttenuationOverrides.AttenuationShapeExtents = FVector(800, 0, 0);
+        Audio->AttenuationOverrides.FalloffDistance = 7000.f;
+    }
+    EngineAudio->SetSound(LoadObject<USoundBase>(nullptr, TEXT("/Game/Audio/S_CarEngine.S_CarEngine")));
+    BrakeAudio->SetSound(LoadObject<USoundBase>(nullptr, TEXT("/Game/Audio/S_CarBrake.S_CarBrake")));
+    BrakeAudio->SetVolumeMultiplier(.30f);
     Body=CreateDefaultSubobject<USceneComponent>(TEXT("CarBody"));
     Body->SetupAttachment(RootComponent);
     Body->SetRelativeLocation(FVector(0,0,70));
@@ -319,6 +342,35 @@ void ADeliveryCar::Present(const Delivery::Car& State,const Delivery::LevelLayou
     }
 }
 
+void ADeliveryCar::UpdateAudio(const Delivery::Car& State, bool Audible, float DeltaSeconds)
+{
+    BrakeCooldown = FMath::Max(0.f, BrakeCooldown - DeltaSeconds);
+    if (!Audible || State.phase != Delivery::CarPhase::Pursuing)
+    {
+        if (EngineAudio->IsPlaying()) EngineAudio->Stop();
+        if (BrakeAudio->IsPlaying()) BrakeAudio->Stop();
+        PreviousAudioSpeed = 0.f;
+        return;
+    }
+
+    const float Speed = float(State.speed);
+    const float SpeedFraction = FMath::Clamp(Speed / 35.f, 0.f, 1.f);
+    EngineAudio->SetPitchMultiplier(FMath::Lerp(.78f, 1.65f, SpeedFraction));
+    EngineAudio->SetVolumeMultiplier(FMath::Lerp(.13f, .29f, SpeedFraction));
+    if (!EngineAudio->IsPlaying()) EngineAudio->Play(FMath::FRandRange(0.f, 2.f));
+
+    // Compare moving frames so a newly spawned, paused or thawing car cannot squeal.
+    const bool SharpBraking = DeltaSeconds > 0.f && PreviousAudioSpeed > 8.f &&
+        PreviousAudioSpeed - Speed >= 7.f * DeltaSeconds;
+    if (SharpBraking && BrakeCooldown <= 0.f && !BrakeAudio->IsPlaying())
+    {
+        BrakeAudio->Play();
+        BrakeCooldown = .9f;
+        UE_LOG(LogTemp, Display, TEXT("DELIVERY_RUSH_CAR_BRAKE: car=%d speed=%.1f"), State.identity, Speed);
+    }
+    PreviousAudioSpeed = Speed;
+}
+
 ADeliveryGameMode::ADeliveryGameMode()
 {
     PrimaryActorTick.bCanEverTick = true;
@@ -328,6 +380,13 @@ ADeliveryGameMode::ADeliveryGameMode()
 void ADeliveryGameMode::BeginPlay()
 {
     Super::BeginPlay();
+    TrafficImpactAttenuation = NewObject<USoundAttenuation>(this);
+    auto& Attenuation = TrafficImpactAttenuation->Attenuation;
+    Attenuation.bAttenuate = true;
+    Attenuation.bSpatialize = true;
+    Attenuation.DistanceAlgorithm = EAttenuationDistanceModel::Linear;
+    Attenuation.AttenuationShapeExtents = FVector(1000, 0, 0);
+    Attenuation.FalloffDistance = 9000.f;
     Ride.BeginCampaign(Delivery::ReadLevelLayout(GetWorld()));
     for(TActorIterator<ADeliveryLevelSettings> It(GetWorld());It;++It)
     {
@@ -392,12 +451,11 @@ void ADeliveryGameMode::SetUpPedestrians()
     PedestrianRefreshPending=false;
     for(auto* Pedestrian:Pedestrians) Pedestrian->Destroy();
     Pedestrians.Reset();
-    if(Ride.Stage()!=Delivery::CampaignStage::FirstChase) return;
+    if(!Ride.HasDeliverySequence()) return;
 
     const auto& Level=*Ride.layout;
-    const auto Junction=Level.start+Delivery::Simulation::Forward(Level.startHeading)*90;
     FRandomStream Random(FMath::Rand());
-    for(const auto& Walk:Delivery::RoadsideWalks(Level,Junction,Random.GetUnsignedInt()))
+    for(const auto& Walk:Delivery::RoadsideWalks(Level,Ride.DeliveryJunction(),Random.GetUnsignedInt()))
     {
         if(auto* Pedestrian=GetWorld()->SpawnActor<ADeliveryPedestrian>())
         {
@@ -405,12 +463,41 @@ void ADeliveryGameMode::SetUpPedestrians()
             Pedestrians.Add(Pedestrian);
         }
     }
-    UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_PEDESTRIANS: count=%d"),Pedestrians.Num());
+    UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_PEDESTRIANS: count=%d stage=%d"),Pedestrians.Num(),int(Ride.Stage()));
 }
 void ADeliveryGameMode::PlayCue(const TCHAR* Name, float Volume)
 {
     const FString Path = FString::Printf(TEXT("/Game/Audio/S_%s.S_%s"), Name, Name);
     if (auto* Sound = LoadObject<USoundBase>(nullptr, *Path)) UGameplayStatics::PlaySound2D(this, Sound, Volume);
+}
+void ADeliveryGameMode::PlayTrafficImpact()
+{
+    const auto& Impact = Ride.trafficImpact;
+    auto* Sound = LoadObject<USoundBase>(nullptr, TEXT("/Game/Audio/S_CarImpact.S_CarImpact"));
+    if (!Sound) return;
+
+    const float Strength = FMath::Clamp(float(Impact.speed / 16.), 0.f, 1.f);
+    const float Volume = FMath::Lerp(.32f, .92f, Strength);
+    const FVector Position(Impact.position.x * 100, Impact.position.y * 100,
+        Ride.layout->height(Impact.position.x, Impact.position.y) * 100 + 65);
+    UGameplayStatics::PlaySoundAtLocation(this, Sound, Position, Volume, 1.f, 0.f, TrafficImpactAttenuation);
+    UE_LOG(LogTemp, Display, TEXT("DELIVERY_RUSH_TRAFFIC_IMPACT: speed=%.1f volume=%.2f"), Impact.speed, Volume);
+}
+void ADeliveryGameMode::UpdateMusic()
+{
+    const bool Riding = Ride.phase == Delivery::Phase::Riding;
+    if (MusicComponent)
+    {
+        MusicComponent->SetPaused(!Riding);
+        UE_LOG(LogTemp, Display, TEXT("DELIVERY_RUSH_MUSIC: %s"), Riding ? TEXT("resumed") : TEXT("paused"));
+        return;
+    }
+    if (!Riding) return;
+
+    auto* Track = LoadObject<USoundBase>(nullptr, TEXT("/Game/Audio/S_CourierLoop.S_CourierLoop"));
+    if (!Track) return;
+    MusicComponent = UGameplayStatics::SpawnSound2D(this, Track, .22f, 1.f, 0.f, nullptr, false, false);
+    if (MusicComponent) UE_LOG(LogTemp, Display, TEXT("DELIVERY_RUSH_MUSIC: started"));
 }
 FString ADeliveryGameMode::GetRideStatus() const
 {
@@ -482,16 +569,26 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
         SetUpPedestrians();
         UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_ORDER: completed=%d money=%d"),Ride.deliveriesCompleted,Ride.money);
     }
-    if(WasRiding!=(Ride.phase==Delivery::Phase::Riding)) UpdateMouseInput(*PC);
+    if(WasRiding!=(Ride.phase==Delivery::Phase::Riding))
+    {
+        UpdateMouseInput(*PC);
+        UpdateMusic();
+    }
     Rider->Present(Ride,DeltaSeconds);
     UpdatePickups();
     if(PedestrianRefreshPending&&!Ride.TrafficFrozen()) SetUpPedestrians();
     for(auto* Pedestrian:Pedestrians) Pedestrian->Present(Ride.trafficElapsed,*Ride.layout);
+    const bool TrafficAudible = Ride.phase == Delivery::Phase::Riding && !Ride.TrafficFrozen();
     for(int32 Index=0;Index<Cars.Num();++Index)
     {
-        if(!Cars[Index]&&Ride.cars[Index].phase!=Delivery::CarPhase::Waiting)
+        const auto& Car = Ride.cars[Index];
+        if(!Cars[Index]&&Car.phase!=Delivery::CarPhase::Waiting)
             Cars[Index]=GetWorld()->SpawnActor<ADeliveryCar>();
-        if(Cars[Index]) Cars[Index]->Present(Ride.cars[Index],Ride.layout.get());
+        if(!Cars[Index]) continue;
+        Cars[Index]->Present(Car,Ride.layout.get());
+        const auto Offset = Car.position - Ride.bike;
+        const bool Nearby = Offset.x * Offset.x + Offset.y * Offset.y <= 70. * 70.;
+        Cars[Index]->UpdateAudio(Car,TrafficAudible && Nearby,DeltaSeconds);
     }
     if(Ride.wavesStarted>PreviousWaves)
         UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_FRONT_WAVE: wave=%d active=%d elapsed=%.2f"),
@@ -503,7 +600,7 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
     }
     if(Ride.freezesCollected>PreviousFreezes)
     {
-        PlayCue(TEXT("Checkpoint"),.55f);
+        PlayCue(TEXT("Freeze"),.55f);
         UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_FREEZE: collected=%d remaining=%.2f"),Ride.freezesCollected,Ride.freezeRemaining);
     }
     if(WasFrozen&&!Ride.TrafficFrozen()) UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_THAW: traffic resumed"));
@@ -519,9 +616,10 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
                 Car.identity,Car.rearAttacks,Ride.elapsed,Car.speed);
     }
     if(Ride.grazes>PreviousGrazes||Ride.falls>PreviousFalls) PlayCue(TEXT("Hit"));
+    if (Ride.trafficImpact.speed > 0) PlayTrafficImpact();
     if(Ride.WreckedCars()>PreviousWrecks)
     {
-        PlayCue(TEXT("Hit"),.35f);
+        if (Ride.trafficImpact.speed <= 0) PlayCue(TEXT("Hit"),.35f);
         UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_ENEMY_WRECK: active=%d wrecked=%d; wreck stays out"),Ride.ActiveCars(),Ride.WreckedCars());
     }
     if(Ride.falls>PreviousFalls) UE_LOG(LogTemp,Display,TEXT("DELIVERY_RUSH_FALL: full restart follows"));
@@ -533,14 +631,24 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
 }
 
 void ADeliveryHUD::Rect(float X, float Y, float W, float H, FLinearColor Color)
-{ DrawRect(Color, OffsetX + X * Scale, OffsetY + Y * Scale, W * Scale, H * Scale); }
-void ADeliveryHUD::Text(const FString& Value, float X, float Y, float Size, FLinearColor Color)
-{ DrawText(Value, Color, OffsetX + X * Scale, OffsetY + Y * Scale, GEngine->GetMediumFont(), Size / 16.f * Scale, false); }
-void ADeliveryHUD::Center(const FString& Value, float Y, float Size, FLinearColor Color)
 {
-    float Width = 0, Height = 0;
-    GetTextSize(Value, Width, Height, GEngine->GetMediumFont(), Size / 16.f);
-    Text(Value, (1280 - Width) * .5f, Y, Size, Color);
+    DrawRect(Color, X * Scale, Y * Scale, W * Scale, H * Scale);
+}
+void ADeliveryHUD::Text(const FString& Value, float X, float Y, float Size, FLinearColor Color,
+    bool Centered, bool Italic)
+{
+    const float Dpi = Canvas->GetDPIScale();
+    const float TextScale = Scale / Dpi;
+    const auto Font = FCoreStyle::GetDefaultFontStyle(Italic ? TEXT("BlackItalic") : TEXT("Bold"), Size * .75f * TextScale);
+    FCanvasTextItem Item(FVector2D(X * TextScale, Y * TextScale), FText::FromString(Value), Font, Color);
+    // Canvas requires a runtime UFont even when Slate supplies the typeface.
+    Item.Font = GEngine->GetMediumFont();
+    Item.bCentreX = Centered;
+    Canvas->DrawItem(Item);
+}
+void ADeliveryHUD::Center(const FString& Value, float Y, float Size, FLinearColor Color, bool Italic)
+{
+    Text(Value, HudWidth * .5f, Y, Size, Color, true, Italic);
 }
 void ADeliveryHUD::DrawHUD()
 {
@@ -553,33 +661,71 @@ void ADeliveryHUD::DrawHUD()
     const bool FinalStage=S.Stage()==Delivery::CampaignStage::CityRush;
     const bool MultipleOrders=S.HasDeliverySequence();
     Scale=FMath::Min(Canvas->SizeX/1280.f,Canvas->SizeY/720.f);
-    OffsetX=(Canvas->SizeX-1280*Scale)*.5f; OffsetY=(Canvas->SizeY-720*Scale)*.5f;
-    Rect(24,22,1232,78,Ink);
-    Text(StageTitle(S.Stage()),43,35,23,White);
-    if(MultipleOrders)
-        Text(FString::Printf(TEXT("ORDER %d / %d   TRAFFIC PRESSURE %d / 3"),FMath::Min(S.deliveriesCompleted+1,Delivery::Simulation::DeliveryCount),Delivery::Simulation::DeliveryCount,FMath::Min(S.deliveriesCompleted+1,Delivery::Simulation::DeliveryCount)),43,72,14,Muted);
-    else Text(FinalStage?TEXT("Choose your own route to the clinic"):TEXT("Deliver to the green beacon"),43,72,14,Muted);
-    const int Seconds=FMath::CeilToInt(float(S.time));
-    if(Tutorial) Center(TEXT("NO TIME LIMIT"),46,20,Teal);
-    else Center(FString::Printf(TEXT("%02d:%02d"),Seconds/60,Seconds%60),35,32,S.time<20?Red:Amber);
-    if(!Tutorial) Center(FString::Printf(TEXT("CASH  %d"),S.money),76,14,Amber);
-    Text(FString::Printf(TEXT("%s  %d m"),S.IsClinicDelivery()?TEXT("CLINIC"):TEXT("DROP"),FMath::CeilToInt(float(S.DistanceToGoal()))),1040,38,22,Teal);
-    Text(FString::Printf(TEXT("ATTEMPT %d"),S.attempt),1040,73,13,Muted);
-    Rect(24,658,1232,42,Ink);
-    Text(TEXT("W pedal  S brake/reverse  A/D turn  SPACE brake  RMB look  ESC pause  R restart"),40,673,13,Muted);
-    Text(FString::Printf(TEXT("%02d km/h"),FMath::RoundToInt(float(FMath::Abs(S.speed)*3.6))),1121,669,19,Teal);
+    if (Scale <= 0) return;
+    HudWidth = Canvas->SizeX / Scale;
+    HudHeight = Canvas->SizeY / Scale;
 
-    // A navigation map only: no enemy markers, attack strips or warning cues.
-    Rect(1030,427,222,211,Ink);
-    constexpr float MapX=1041,MapY=440,MapSize=198;
-    auto MapPoint=[&S](double X,double Y){ const double L=S.layout->limit; return FVector2D(MapX+float((Y+L)/(2*L))*MapSize,MapY+MapSize-float((X+L)/(2*L))*MapSize); };
-    const FVector2D Split=MapPoint(Delivery::ParkMinX,0);
-    Rect(MapX,MapY,MapSize,Split.Y-MapY,FLinearColor(.12f,.27f,.09f));
+    const float TimerX = HudWidth * .5f - 90;
+    const bool TimeLow = !Tutorial && S.time < 20;
+    Rect(TimerX, 20, 180, 74, TimerYellow);
+    Rect(TimerX, 90, 180, 4, TimeLow ? Red : Amber);
+    Center(Tutorial ? TEXT("TRAINING") : TimeLow ? TEXT("TIME RUNNING LOW") : TEXT("TIME LEFT"), 26, 14, TimerInk);
+    if (Tutorial) Center(TEXT("NO TIME LIMIT"), 48, 23, TimerInk, true);
+    else
+    {
+        const int Seconds = FMath::Max(0, FMath::CeilToInt(float(S.time)));
+        Center(FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), 37, 44, TimerInk, true);
+    }
+
+    const float InfoX = HudWidth - 388;
+    Rect(InfoX, 24, 364, 153, Ink);
+    Rect(InfoX, 24, 5, 153, Teal);
+    Text(FString::Printf(TEXT("STAGE %d / 3"), int32(S.Stage())), InfoX + 20, 33, 17, Teal);
+    Text(FString::Printf(TEXT("ATTEMPT %d"), S.attempt), InfoX + 244, 35, 15, Muted);
+    Text(StageTitle(S.Stage()), InfoX + 20, 54, 27, White);
+    if (MultipleOrders)
+    {
+        const int Order = FMath::Min(S.deliveriesCompleted + 1, Delivery::Simulation::DeliveryCount);
+        Text(FString::Printf(TEXT("ORDER %d / %d   TRAFFIC %d / 3"), Order, Delivery::Simulation::DeliveryCount, Order),
+            InfoX + 20, 90, 19, Muted);
+    }
+    else Text(TEXT("FOLLOW THE GREEN BEACON"), InfoX + 20, 90, 17, Muted);
+    Rect(InfoX + 20, 118, 324, 1, Muted * .44f);
+    Text(FString::Printf(TEXT("%s  %d m"), S.IsClinicDelivery() ? TEXT("CLINIC") : TEXT("DROP"),
+        FMath::CeilToInt(float(S.DistanceToGoal()))), InfoX + 20, 128, 27, White);
+    if (!Tutorial) Text(FString::Printf(TEXT("CASH %d"), S.money), InfoX + 242, 136, 18, Amber);
+
+    const float ControlsY = HudHeight - 65;
+    Rect(24, ControlsY, HudWidth - 238, 41, Ink);
+    Text(TEXT("W PEDAL    A/D TURN    S BRAKE / REVERSE    SPACE BRAKE    RMB LOOK    ESC PAUSE    R RETRY"),
+        40, ControlsY + 10, 17, White);
+    Rect(HudWidth - 202, HudHeight - 95, 178, 71, Ink);
+    Rect(HudWidth - 202, HudHeight - 95, 5, 71, Teal);
+    Text(FString::Printf(TEXT("%02d"), FMath::RoundToInt(float(FMath::Abs(S.speed) * 3.6))),
+        HudWidth - 180, HudHeight - 94, 51, Teal, false, true);
+    Text(TEXT("KM/H"), HudWidth - 101, HudHeight - 66, 19, White);
+
+    Rect(24, 24, 232, 258, Ink);
+    Rect(24, 24, 232, 4, Teal);
+    Text(TEXT("ROUTE MAP"), 36, 33, 19, White);
+    constexpr float MapX = 36, MapY = 62, MapSize = 208;
+    Rect(MapX, MapY, MapSize, MapSize, FLinearColor(.035f, .069f, .095f));
+    const auto MapPoint = [&](double X, double Y)
+    {
+        const double Limit = S.layout->limit;
+        const double Horizontal = FMath::Clamp((Y + Limit) / (2 * Limit), 0., 1.);
+        const double Vertical = FMath::Clamp((Limit - X) / (2 * Limit), 0., 1.);
+        return FVector2D(MapX + Horizontal * MapSize, MapY + Vertical * MapSize);
+    };
+    const auto ParkEdge = MapPoint(Delivery::ParkMinX, 0);
+    Rect(MapX, MapY, MapSize, ParkEdge.Y - MapY, FLinearColor(.12f, .27f, .09f));
     for(const auto& Path:S.layout->paths)
     {
         const auto A=MapPoint(Path.ax,Path.ay), B=MapPoint(Path.bx,Path.by);
-        DrawLine(OffsetX+A.X*Scale,OffsetY+A.Y*Scale,OffsetX+B.X*Scale,OffsetY+B.Y*Scale,
-            FLinearColor(.55f,.5f,.4f),2*Scale);
+        const bool ParkPath = Path.width < 8;
+        DrawLine(A.X * Scale, A.Y * Scale, B.X * Scale, B.Y * Scale,
+            FLinearColor(.59f, .57f, .48f),
+            (ParkPath ? 1.6f : 2.f) * Scale);
     }
     for(const auto& Obstacle:S.layout->obstacles)
     {
@@ -590,16 +736,16 @@ void ADeliveryHUD::DrawHUD()
             Points[Index++]=MapPoint(Obstacle.x+FMath::Cos(Obstacle.yaw)*X-FMath::Sin(Obstacle.yaw)*Y,
                 Obstacle.y+FMath::Sin(Obstacle.yaw)*X+FMath::Cos(Obstacle.yaw)*Y);
         }
-        for(int I=0;I<4;++I) DrawLine(OffsetX+Points[I].X*Scale,OffsetY+Points[I].Y*Scale,
-            OffsetX+Points[(I+1)%4].X*Scale,OffsetY+Points[(I+1)%4].Y*Scale,Muted*.5f,Scale);
+        for(int I=0;I<4;++I) DrawLine(Points[I].X*Scale,Points[I].Y*Scale,
+            Points[(I+1)%4].X*Scale,Points[(I+1)%4].Y*Scale,Muted*.5f,Scale);
     }
     FVector2D Goal=MapPoint(S.layout->goal.x,S.layout->goal.y);
-    Rect(Goal.X-4,Goal.Y-4,8,8,Teal);
+    Rect(Goal.X-5,Goal.Y-5,10,10,Teal);
     for(const auto& Pickup:S.timePickups)
     {
         if(!Pickup.available) continue;
         const FVector2D Point=MapPoint(Pickup.position.x,Pickup.position.y);
-        Rect(Point.X-2.5f,Point.Y-2.5f,5,5,Amber);
+        Rect(Point.X-3.5f,Point.Y-3.5f,7,7,TimerYellow);
     }
     for(const auto& Pickup:S.freezePickups)
     {
@@ -611,75 +757,98 @@ void ADeliveryHUD::DrawHUD()
     FVector2D Player=MapPoint(S.bike.x,S.bike.y);
     Rect(Player.X-3,Player.Y-3,6,6,White);
     const FVector2D Tip=Player+FVector2D(float(FMath::Sin(S.heading))*10,-float(FMath::Cos(S.heading))*10);
-    DrawLine(OffsetX+Player.X*Scale,OffsetY+Player.Y*Scale,OffsetX+Tip.X*Scale,OffsetY+Tip.Y*Scale,White,2*Scale);
+    DrawLine(Player.X*Scale,Player.Y*Scale,Tip.X*Scale,Tip.Y*Scale,White,2.5f*Scale);
     if(S.phase==Delivery::Phase::Riding)
     {
+        const float Middle = HudWidth * .5f;
         if(S.TrafficFrozen())
         {
-            Rect(466,111,348,42,Ink);
-            Center(FString::Printf(TEXT("TRAFFIC FROZEN   %.1f s"),S.freezeRemaining),122,21,Ice);
+            Rect(Middle - 157, 105, 314, 37, Ink);
+            Center(FString::Printf(TEXT("TRAFFIC FROZEN   %.1f s"), S.freezeRemaining), 112, 20, Ice);
         }
+        const float NoticeY = HudHeight - 139;
         if(Tutorial)
         {
-            Rect(290,572,700,47,Ink);
-            Center(TEXT("W pedal    A / D steer    SPACE brake    Aim for the green beacon"),585,17,White);
+            Rect(Middle - 306, NoticeY, 612, 43, Ink);
+            Center(TEXT("PEDAL TO THE GREEN BEACON"), NoticeY + 9, 22, White);
         }
         else if(S.deliveryFlash>0)
         {
-            Center(FString::Printf(TEXT("ORDER %d DELIVERED   +%d CASH"),S.deliveriesCompleted,Delivery::Simulation::DeliveryReward),540,23,Amber);
-            Center(TEXT("Next destination marked in green. Traffic pressure increased."),575,17,White);
+            Rect(Middle - 158, NoticeY, 316, 38, Ink);
+            Center(FString::Printf(TEXT("ORDER %d DELIVERED   +%d"), S.deliveriesCompleted,
+                Delivery::Simulation::DeliveryReward), NoticeY + 8, 20, TimerYellow);
         }
         else if(S.timePickupFlash>0)
-            Center(FString::Printf(TEXT("+%d SECONDS"),Delivery::Simulation::TimePickupBonus),565,23,Amber);
-        else if(S.restartFlash>0) Center(TEXT("NEW ATTEMPT"),565,20,White);
+        {
+            Rect(Middle - 122, NoticeY, 244, 43, Ink);
+            Center(FString::Printf(TEXT("+%d SECONDS"), Delivery::Simulation::TimePickupBonus), NoticeY + 7, 25, TimerYellow);
+        }
+        else if(S.restartFlash>0) Center(TEXT("NEW ATTEMPT"), NoticeY + 8, 24, White);
         if(S.hitFlash>0) DrawRect(FLinearColor(1,.5f,.2f,float(S.hitFlash)*.15f),0,0,Canvas->SizeX,Canvas->SizeY);
         return;
     }
+    const bool Delivered = S.phase == Delivery::Phase::Delivered;
+    const float DialogWidth = Delivered ? 560.f : 740.f;
+    const float DialogHeight = Delivered ? 208.f : 324.f;
+    const float DialogX = (HudWidth - DialogWidth) * .5f;
+    const float DialogY = (HudHeight - DialogHeight) * .5f;
     if(S.phase==Delivery::Phase::Fallen)
     {
-        Rect(390,278,500,106,Ink); Center(TEXT("FELL OFF THE BIKE"),300,30,White);
-        Center(MultipleOrders?TEXT("Retrying from the last delivery checkpoint..."):TEXT("Restarting from the beginning..."),347,18,Muted); return;
+        Rect(DialogX, DialogY + 80, 740, 112, Ink);
+        Center(TEXT("FELL OFF THE BIKE"), DialogY + 93, 36, White, true);
+        Center(MultipleOrders ? TEXT("Retrying from the last delivery checkpoint...") : TEXT("Restarting from the beginning..."),
+            DialogY + 142, 21, Muted);
+        return;
     }
-    Rect(250,219,780,326,FLinearColor(.02f,.035f,.055f,.96f));
+    Rect(DialogX, DialogY, DialogWidth, DialogHeight, FLinearColor(.02f, .035f, .055f, .97f));
+    Rect(DialogX, DialogY, DialogWidth, 5, TimerYellow);
+    const TCHAR* Prompt = nullptr;
     if(S.phase==Delivery::Phase::Ready)
     {
-        Center(StageTitle(S.Stage()),256,27,White);
+        Center(StageTitle(S.Stage()), DialogY + 24, 40, White, true);
         if(Tutorial)
         {
-            Center(TEXT("Practice pedaling, steering and braking at your own pace."),310,18,Muted);
-            Center(TEXT("W pedals, A / D steer while moving, SPACE brakes."),348,18,Muted);
-            Center(TEXT("Reach the green beacon to make your first delivery."),386,18,Muted);
+            Center(TEXT("Practice pedaling, steering and braking."), DialogY + 96, 22, Muted);
+            Center(TEXT("W pedals, A/D steer, SPACE brakes."), DialogY + 134, 22, White);
+            Center(TEXT("Reach the green beacon to make your first delivery."), DialogY + 172, 21, Muted);
         }
         else if(FinalStage)
         {
-            Center(FString::Printf(TEXT("3 deliveries, %.0f seconds each. Finish at the clinic."),S.layout->timeLimit),310,18,White);
-            Center(TEXT("Faster cars and more front / rear traffic with every order."),348,18,Muted);
-            Center(TEXT("Earn 100 cash per order. Retry from the last drop."),386,17,Muted);
-            Center(TEXT("Alley coins add 10 seconds. Blue snowflakes freeze traffic for 5 seconds."),420,16,Ice);
+            Center(FString::Printf(TEXT("3 deliveries, %.0f seconds each. Finish at the clinic."), S.layout->timeLimit), DialogY + 88, 21, White);
+            Center(TEXT("Dodge faster traffic from the front and rear."), DialogY + 124, 21, Muted);
+            Center(TEXT("Earn 100 per order. Retry from the last drop."), DialogY + 160, 21, Muted);
+            Center(TEXT("Alley coins +10s. Snowflakes freeze traffic for 5s."), DialogY + 196, 21, Ice);
         }
         else
         {
-            Center(FString::Printf(TEXT("Complete 3 deliveries. Each on-time order earns %d cash."),Delivery::Simulation::DeliveryReward),305,17,White);
-            Center(TEXT("2-3 cars aim at you from ahead or diagonally. Swerve to dodge."),348,18,Muted);
-            Center(TEXT("Gold clocks add 10 seconds. Blue snowflakes freeze traffic for 5 seconds."),386,16,Ice);
-            Center(TEXT("90 seconds each. Traffic grows with every drop. Checkpoint retries."),420,16,Muted);
+            Center(FString::Printf(TEXT("3 deliveries, %.0f seconds each. Earn 100 per order."), S.layout->timeLimit), DialogY + 88, 21, White);
+            Center(TEXT("Swerve to dodge 2–3 cars charging from ahead."), DialogY + 124, 21, Muted);
+            Center(TEXT("Gold clocks +10s. Snowflakes freeze traffic for 5s."), DialogY + 160, 21, Ice);
+            Center(TEXT("Traffic grows with each drop. Retry from the last drop."), DialogY + 196, 20, Muted);
         }
-        Center(TEXT("PRESS ENTER TO RIDE"),461,24,Teal);
+        Prompt = TEXT("PRESS ENTER TO RIDE");
     }
     else if(S.phase==Delivery::Phase::Paused)
     {
-        Center(TEXT("PAUSED"),285,38,White); Center(TEXT("ENTER / P TO CONTINUE"),440,23,Teal);
+        Center(TEXT("PAUSED"), DialogY + 88, 46, White, true);
+        Prompt = TEXT("ENTER / P TO CONTINUE");
     }
-    else if(S.phase==Delivery::Phase::Delivered)
+    else if(Delivered)
     {
-        Center(FinalStage?TEXT("ALL 3 STAGES COMPLETE"):(MultipleOrders?TEXT("THREE DELIVERIES COMPLETE"):TEXT("PARCEL DELIVERED")),274,35,Teal);
-        Center(Tutorial?TEXT("Riding lesson complete"):FString::Printf(TEXT("%.1f seconds left / %d falls / %d brushes"),S.time,S.falls,S.grazes),351,19,White);
-        if(MultipleOrders) Center(FString::Printf(TEXT("3 / 3 delivered   CASH %d"),S.money),394,22,Amber);
-        Center(FinalStage?TEXT("ENTER TO START A NEW CAMPAIGN"):TEXT("ENTER FOR THE NEXT STAGE"),449,23,Teal);
+        Center(FinalStage ? TEXT("ALL 3 STAGES COMPLETE") : MultipleOrders ? TEXT("THREE DELIVERIES COMPLETE") : TEXT("PARCEL DELIVERED"),
+            DialogY + 24, 30, Teal, true);
+        Center(Tutorial ? TEXT("Riding lesson complete") : FString::Printf(TEXT("%.1f seconds left / %d falls / %d brushes"), S.time, S.falls, S.grazes),
+            DialogY + 76, 19, White);
+        if(MultipleOrders) Center(FString::Printf(TEXT("3 / 3 DELIVERED   CASH %d"), S.money), DialogY + 108, 20, TimerYellow);
+        Prompt = FinalStage ? TEXT("ENTER TO START A NEW CAMPAIGN") : TEXT("ENTER FOR THE NEXT STAGE");
     }
     else
     {
-        Center(TEXT("DELIVERY TOO LATE"),280,34,Red);
-        Center(MultipleOrders?TEXT("ENTER / R TO RETRY THIS ORDER"):TEXT("ENTER / R TO RETRY THIS STAGE"),439,20,Teal);
+        Center(TEXT("DELIVERY TOO LATE"), DialogY + 88, 43, Red, true);
+        Prompt = MultipleOrders ? TEXT("ENTER / R TO RETRY THIS ORDER") : TEXT("ENTER / R TO RETRY THIS STAGE");
     }
+    const float ButtonWidth = Delivered ? 376.f : 460.f;
+    const float ButtonY = DialogY + (Delivered ? 151.f : 252.f);
+    Rect((HudWidth - ButtonWidth) * .5f, ButtonY, ButtonWidth, Delivered ? 39.f : 47.f, TimerYellow);
+    Center(Prompt, ButtonY + 9, Delivered ? 19.f : 23.f, TimerInk);
 }

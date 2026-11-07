@@ -8,6 +8,7 @@ class AStaticMeshActor;
 class UBoxComponent;
 class USplineComponent;
 class UInstancedStaticMeshComponent;
+class UProceduralMeshComponent;
 
 // Move/duplicate these actors to shape the height field in the editor.
 UCLASS(meta=(DisplayName="Delivery Hill"))
@@ -38,12 +39,15 @@ class DELIVERYRUSH_API ADeliveryRoad : public AActor
 public:
     ADeliveryRoad();
     virtual void OnConstruction(const FTransform& Transform) override;
+    virtual void PostRegisterAllComponents() override;
     UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Road") USplineComponent* Spline;
     UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Road",meta=(ClampMin="100",Units="cm")) double Width=1800;
     UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Road") bool bDirtPath=false;
     UFUNCTION(BlueprintCallable,CallInEditor,Category="Road") void RebuildRoad();
 private:
+    // Retained to load older maps, whose road surface used overlapping instances.
     UPROPERTY() UInstancedStaticMeshComponent* Pieces;
+    UPROPERTY(Transient) UProceduralMeshComponent* Ribbon;
 };
 
 UCLASS(meta=(DisplayName="Delivery Level Settings"))

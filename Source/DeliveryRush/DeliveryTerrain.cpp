@@ -89,6 +89,8 @@ void ADeliveryTerrain::BeginPlay()
     // Recreate game render buffers from the shared terrain, rather than reuse
     // the editor's serialized preview buffers.
     BuildSurface();
+    if (bUseLevelHills)
+        for (TActorIterator<ADeliveryRoad> Road(GetWorld()); Road; ++Road) Road->RebuildRoad();
 #if WITH_EDITOR
     if(bUseLevelHills) BakeSurface(); // Include unsaved editor changes when entering PIE.
 #endif

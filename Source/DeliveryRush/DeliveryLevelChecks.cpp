@@ -9,6 +9,8 @@
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "Misc/AutomationTest.h"
+#include "ProceduralMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include <algorithm>
 #include <cmath>
 
@@ -24,6 +26,44 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
     TActorIterator<ADeliveryRoad> RoadIt(World);
     if(!TestTrue(TEXT("Editable map has settings, terrain, hills and spline roads"),bool(SettingsIt)&&bool(TerrainIt)&&bool(HillIt)&&bool(RoadIt))) return false;
     auto* Settings=*SettingsIt;auto* Terrain=*TerrainIt;auto* Hill=*HillIt;auto* Road=*RoadIt;
+    int DirtRoads = 0;
+    bool GroundClear = true, InsideMap = true, FlushTriangles = true, LegacyHidden = true;
+    double HighestDirt = 0, LowestPavement = 100;
+    for (TActorIterator<ADeliveryRoad> Path(World); Path; ++Path)
+    {
+        Path->RebuildRoad();
+        auto* Mesh = Path->FindComponentByClass<UProceduralMeshComponent>();
+        const auto* Section = Mesh ? Mesh->GetProcMeshSection(0) : nullptr;
+        if (!TestTrue(TEXT("A spline road produces a visible conforming mesh"), Section && !Section->ProcIndexBuffer.IsEmpty())) continue;
+        auto* Legacy = Path->FindComponentByClass<UInstancedStaticMeshComponent>();
+        LegacyHidden &= Legacy && !Legacy->IsVisible() && Legacy->GetInstanceCount() == 0;
+        if (Path->bDirtPath) ++DirtRoads;
+        const auto& Transform = Mesh->GetComponentTransform();
+        const auto Clearance = [&](const FVector& Point)
+        {
+            return Point.Z - Terrain->SampleHeight(Point.X / 100, Point.Y / 100) * 100;
+        };
+        for (const auto& Vertex : Section->ProcVertexBuffer)
+        {
+            const auto Point = Transform.TransformPosition(Vertex.Position);
+            const double Lift = Clearance(Point);
+            GroundClear &= Lift > 1.9 && Lift < 11.1;
+            InsideMap &= FMath::Abs(Point.X) <= Settings->WorldHalfExtent + .01 &&
+                         FMath::Abs(Point.Y) <= Settings->WorldHalfExtent + .01;
+            if (Path->bDirtPath) HighestDirt = FMath::Max(HighestDirt, Lift);
+            else LowestPavement = FMath::Min(LowestPavement, Lift);
+        }
+        for (int32 Index = 0; Index + 2 < Section->ProcIndexBuffer.Num(); Index += 3)
+        {
+            const auto A = Transform.TransformPosition(Section->ProcVertexBuffer[Section->ProcIndexBuffer[Index]].Position);
+            const auto B = Transform.TransformPosition(Section->ProcVertexBuffer[Section->ProcIndexBuffer[Index + 1]].Position);
+            const auto C = Transform.TransformPosition(Section->ProcVertexBuffer[Section->ProcIndexBuffer[Index + 2]].Position);
+            FlushTriangles &= FMath::Abs(Clearance((A + B + C) / 3) - Clearance(A)) < .02;
+        }
+    }
+    TestTrue(TEXT("Park paths follow the ground triangles without cutting into the slope"), DirtRoads > 0 && GroundClear && FlushTriangles);
+    TestTrue(TEXT("Road surfaces end within the map and hide the old overlapping tiles"), InsideMap && LegacyHidden);
+    TestTrue(TEXT("Dirt joins go underneath the pavement without sharing its depth"), HighestDirt < LowestPavement);
     auto Baseline=Delivery::ReadLevelLayout(World);
     Delivery::Simulation Campaign;
     Campaign.BeginCampaign(Baseline);
@@ -84,7 +124,7 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
             (Offset.x*Forward.x+Offset.y*Forward.y)/Range>=FMath::Cos(PI/4)-.01);
         TestTrue(TEXT("A live-map entry has a clear approach to the rider"),MovingTraffic.RouteClear(Car.position,MovingTraffic.bike,1.2));
     }
-    const auto Walks=Delivery::RoadsideWalks(*Campaign.layout,Junction,27);
+    const auto Walks=Delivery::RoadsideWalks(*Campaign.layout,Campaign.DeliveryJunction(),27);
     TestTrue(TEXT("The live streets have several pedestrian routes"),Walks.size()>=8);
     for(const auto& Walk:Walks)
         TestTrue(TEXT("A sidewalk route clears solid obstacles"),Campaign.RouteClear(Walk.start,Walk.end,.65));
@@ -130,7 +170,8 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
             const auto Corner=Campaign.layout->start+Delivery::Simulation::Forward(Campaign.layout->startHeading)*90;
             TestTrue(TEXT("The next drop has a clear route through the live streets"),
                 Campaign.RouteClear(Campaign.layout->start,Corner,2)&&Campaign.RouteClear(Corner,Campaign.layout->goal,2));
-            TestTrue(TEXT("The next order immediately starts with its own deadline"),Campaign.phase==Delivery::Phase::Riding&&Campaign.time>89.9);
+            TestTrue(TEXT("The next order immediately starts with one minute"),
+                Campaign.phase==Delivery::Phase::Riding&&Campaign.layout->timeLimit==60&&Campaign.time>59.9&&Campaign.time<=60);
         }
     }
     TestTrue(TEXT("Only the third drop completes stage two"),Campaign.phase==Delivery::Phase::Delivered);
@@ -166,6 +207,10 @@ bool FDeliveryLevelEditCheck::RunTest(const FString& Parameters)
         const auto Corner=Campaign.DeliveryJunction();
         TestTrue(TEXT("Every final-stage drop has a clear street route on the live map"),
             Campaign.RouteClear(Campaign.layout->start,Corner,2)&&Campaign.RouteClear(Corner,Campaign.layout->goal,2));
+        const auto FinalWalks=Delivery::RoadsideWalks(*Campaign.layout,Corner,27);
+        TestTrue(TEXT("Every final-stage delivery has several roadside walks"),FinalWalks.size()>=4);
+        for(const auto& Walk:FinalWalks)
+            TestTrue(TEXT("A final-stage sidewalk route clears solid obstacles"),Campaign.RouteClear(Walk.start,Walk.end,.65));
         const auto FirstLeg=Corner-Campaign.layout->start, LastLeg=Campaign.layout->goal-Corner;
         TestTrue(TEXT("Each final-stage live-map route is longer than before"),
             std::hypot(FirstLeg.x,FirstLeg.y)+std::hypot(LastLeg.x,LastLeg.y)>=269.9+90*Order);

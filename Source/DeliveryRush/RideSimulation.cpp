@@ -121,7 +121,7 @@ void Simulation::LoadStage(CampaignStage nextStage)
                 }
             }
             route->goal=deliveryStops[0];
-            route->timeLimit=stage==CampaignStage::FirstChase?90:60;
+            route->timeLimit=60;
         }
         layout=std::move(route);
     }
@@ -150,6 +150,7 @@ void Simulation::Reset()
     phase=Phase::Ready; bike=layout->start; heading=layout->startHeading; speed=0; time=layout->timeLimit;
     elapsed=travelled=steering=roll=rollVelocity=hitFlash=fallTimer=restartFlash=0;
     shove={}; falls=grazes=0; attempt=1;
+    trafficImpact={};
     frontWavesEnabled=stage!=CampaignStage::Tutorial; wavesStarted=0;
     nextFrontWaveAt=stage==CampaignStage::FirstChase?2.5:0;
     travelAtLastWave=nextWaveCheckAt=0;
@@ -323,6 +324,7 @@ void Simulation::Fall(double direction)
 }
 void Simulation::Tick(double dt,const Input& input)
 {
+    trafficImpact={};
     if(!std::isfinite(dt)||dt<=0||(phase!=Phase::Riding&&phase!=Phase::Fallen)) return;
     while(dt>1e-8&&(phase==Phase::Riding||phase==Phase::Fallen))
     {
@@ -773,6 +775,9 @@ void Simulation::CarContacts()
                        b.position,Forward(b.heading),CarLength,CarWidth,normal,depth)) continue;
         const Vec2 av=Forward(a.heading)*a.speed, bv=Forward(b.heading)*b.speed;
         const double impact=std::max(0.0,-Dot(av-bv,normal));
+        // Keep one impact per rendered frame, even when both cars overturn.
+        if (impact >= 1.5 && impact > trafficImpact.speed)
+            trafficImpact = {(a.position + b.position) * .5, impact};
         // A stopped wreck is solid. It never resumes pursuit or gets pushed
         // back into the active fleet by another collision.
         const double aShare=aActive?(bActive?.5:1):0;

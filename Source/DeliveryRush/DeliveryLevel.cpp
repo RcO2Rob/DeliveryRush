@@ -9,6 +9,111 @@
 #include "EngineUtils.h"
 #include "GameFramework/PlayerStart.h"
 #include "Materials/MaterialInterface.h"
+#include "ProceduralMeshComponent.h"
+
+namespace
+{
+using RoadPolygon = TArray<FVector2D, TInlineAllocator<12>>;
+
+RoadPolygon ClipRoadPolygon(const RoadPolygon& Polygon, FVector2D Normal, double Offset)
+{
+    RoadPolygon Result;
+    if (Polygon.IsEmpty()) return Result;
+    FVector2D Previous = Polygon.Last();
+    double PreviousSide = FVector2D::DotProduct(Previous, Normal) - Offset;
+    for (const FVector2D& Point : Polygon)
+    {
+        const double Side = FVector2D::DotProduct(Point, Normal) - Offset;
+        if ((Side >= 0) != (PreviousSide >= 0))
+            Result.Add(FMath::Lerp(Previous, Point, PreviousSide / (PreviousSide - Side)));
+        if (Side >= 0) Result.Add(Point);
+        Previous = Point;
+        PreviousSide = Side;
+    }
+    return Result;
+}
+
+struct RoadMesh
+{
+    TArray<FVector> Vertices;
+    TArray<int32> Triangles;
+    TArray<FVector> Normals;
+    TArray<FVector2D> UVs;
+
+    void Add(const RoadPolygon& Polygon, const ADeliveryTerrain* Terrain,
+        const FTransform& RoadTransform, double Lift, double FallbackZ)
+    {
+        if (Polygon.Num() < 3) return;
+        double PolygonArea = 0;
+        for (int32 Index = 1; Index + 1 < Polygon.Num(); ++Index)
+            PolygonArea += FVector2D::CrossProduct(Polygon[Index] - Polygon[0], Polygon[Index + 1] - Polygon[0]);
+        if (FMath::Abs(PolygonArea) < .01) return;
+        const int32 Base = Vertices.Num();
+        for (const auto& Point : Polygon)
+        {
+            const double Height = Terrain ? Terrain->SampleHeight(Point.X / 100, Point.Y / 100) * 100 : FallbackZ;
+            Vertices.Add(RoadTransform.InverseTransformPosition(FVector(Point.X, Point.Y, Height + Lift)));
+            FVector Normal = FVector::UpVector;
+            if (Terrain)
+            {
+                const double X = Point.X / 100, Y = Point.Y / 100;
+                const double SlopeX = (Terrain->SampleHeight(X + .2, Y) - Terrain->SampleHeight(X - .2, Y)) / .4;
+                const double SlopeY = (Terrain->SampleHeight(X, Y + .2) - Terrain->SampleHeight(X, Y - .2)) / .4;
+                Normal = FVector(-SlopeX, -SlopeY, 1).GetSafeNormal();
+            }
+            Normals.Add(RoadTransform.InverseTransformVectorNoScale(Normal));
+            UVs.Add(Point / 1000);
+        }
+        for (int32 Index = 1; Index + 1 < Polygon.Num(); ++Index)
+        {
+            const double Area = FVector2D::CrossProduct(Polygon[Index] - Polygon[0], Polygon[Index + 1] - Polygon[0]);
+            if (FMath::Abs(Area) < .01) continue;
+            if (Area < 0) Triangles.Append({Base, Base + Index, Base + Index + 1});
+            else Triangles.Append({Base, Base + Index + 1, Base + Index});
+        }
+    }
+};
+
+void DrapeRoadStrip(RoadMesh& Mesh, RoadPolygon Strip, const ADeliveryTerrain* Terrain,
+    const FTransform& RoadTransform, double Limit, double Lift, double FallbackZ)
+{
+    Strip = ClipRoadPolygon(Strip, {1, 0}, -Limit);
+    Strip = ClipRoadPolygon(Strip, {-1, 0}, -Limit);
+    Strip = ClipRoadPolygon(Strip, {0, 1}, -Limit);
+    Strip = ClipRoadPolygon(Strip, {0, -1}, -Limit);
+    if (Strip.Num() < 3) return;
+    if (!Terrain)
+    {
+        Mesh.Add(Strip, nullptr, RoadTransform, Lift, FallbackZ);
+        return;
+    }
+
+    // Split at the same grid edges and diagonal as the terrain. A road triangle
+    // then follows one ground triangle exactly, including across steep slopes.
+    constexpr double Grid = Delivery::TerrainGridStep * 100;
+    constexpr double Origin = -Delivery::TerrainExtent * 100;
+    FBox2D Bounds(ForceInit);
+    for (const auto& Point : Strip) Bounds += Point;
+    const int32 MinX = FMath::FloorToInt((Bounds.Min.X - Origin) / Grid);
+    const int32 MaxX = FMath::FloorToInt((Bounds.Max.X - Origin) / Grid);
+    const int32 MinY = FMath::FloorToInt((Bounds.Min.Y - Origin) / Grid);
+    const int32 MaxY = FMath::FloorToInt((Bounds.Max.Y - Origin) / Grid);
+    for (int32 X = MinX; X <= MaxX; ++X)
+    {
+        const double CellX = Origin + X * Grid;
+        auto Column = ClipRoadPolygon(Strip, {1, 0}, CellX);
+        Column = ClipRoadPolygon(Column, {-1, 0}, -CellX - Grid);
+        for (int32 Y = MinY; Y <= MaxY; ++Y)
+        {
+            const double CellY = Origin + Y * Grid;
+            auto Cell = ClipRoadPolygon(Column, {0, 1}, CellY);
+            Cell = ClipRoadPolygon(Cell, {0, -1}, -CellY - Grid);
+            Mesh.Add(ClipRoadPolygon(Cell, {1, -1}, CellX - CellY), Terrain, RoadTransform, Lift, FallbackZ);
+            Mesh.Add(ClipRoadPolygon(Cell, {-1, 1}, CellY - CellX), Terrain, RoadTransform, Lift, FallbackZ);
+        }
+    }
+}
+}
 
 ADeliveryHill::ADeliveryHill()
 {
@@ -46,31 +151,83 @@ ADeliveryRoad::ADeliveryRoad()
     Pieces=CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("RoadSurface"));Pieces->SetupAttachment(Spline);
     Pieces->SetStaticMesh(LoadObject<UStaticMesh>(nullptr,TEXT("/Engine/BasicShapes/Cube.Cube")));
     Pieces->SetCollisionEnabled(ECollisionEnabled::NoCollision);Pieces->SetCastShadow(false);
+    Ribbon = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("ConformingRoad"));
+    Ribbon->SetFlags(RF_Transient);
+    Ribbon->SetupAttachment(Spline);
+    Ribbon->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    Ribbon->SetCastShadow(false);
     Tags.Add(TEXT("DeliveryDecoration"));
 }
 void ADeliveryRoad::OnConstruction(const FTransform& Transform) { Super::OnConstruction(Transform);RebuildRoad(); }
+void ADeliveryRoad::PostRegisterAllComponents()
+{
+    Super::PostRegisterAllComponents();
+    if (GetWorld() && !GetWorld()->IsGameWorld()) RebuildRoad();
+}
 void ADeliveryRoad::RebuildRoad()
 {
     Pieces->ClearInstances();
+    Pieces->SetVisibility(false);
     const TCHAR* Material=bDirtPath?TEXT("/Game/Art/M_Dirt.M_Dirt"):TEXT("/Game/Art/M_Road.M_Road");
-    Pieces->SetMaterial(0,LoadObject<UMaterialInterface>(nullptr,Material));
+    Ribbon->ClearAllMeshSections();
+    Ribbon->SetMaterial(0,LoadObject<UMaterialInterface>(nullptr,Material));
     ADeliveryTerrain* Terrain=nullptr;
-    if(GetWorld()) { TActorIterator<ADeliveryTerrain> It(GetWorld());if(It) Terrain=*It; }
-    const double Length=Spline->GetSplineLength();const int Count=FMath::Max(1,FMath::CeilToInt(Length/200));
-    auto Sample=[&](double Distance)
+    double Limit = Delivery::TerrainExtent * 100;
+    int32 Layer = 0, LayerCount = 0;
+    if (UWorld* World = GetWorld())
     {
-        FVector P=Spline->GetLocationAtDistanceAlongSpline(Distance,ESplineCoordinateSpace::World);
-        if(Terrain) P.Z=Terrain->SampleHeight(P.X/100,P.Y/100)*100+3;
-        return P;
-    };
-    for(int i=0;i<Count;++i)
-    {
-        const FVector A=Sample(Length*i/Count),B=Sample(Length*(i+1)/Count),D=B-A;
-        if(D.Size()<1) continue;
-        const FTransform T(D.Rotation(),(A+B)*.5,FVector((D.Size()+3)/100,Width/100, .04));
-        Pieces->AddInstance(T,true);
+        TActorIterator<ADeliveryTerrain> It(World);
+        if (It) Terrain = *It;
+        TActorIterator<ADeliveryLevelSettings> Settings(World);
+        if (Settings) Limit = FMath::Min(Limit, Settings->WorldHalfExtent);
+        for (TActorIterator<ADeliveryRoad> Road(World); Road; ++Road)
+        {
+            if (Road->bDirtPath != bDirtPath) continue;
+            ++LayerCount;
+            if (Road->GetFName().LexicalLess(GetFName())) ++Layer;
+        }
     }
-    MarkPackageDirty();
+    // Keep intersections ordered by material, with pavement covering dirt ends.
+    const double Lift = (bDirtPath ? 2. : 8.) + 3. * (Layer + 1) / (LayerCount + 1);
+    TArray<FVector2D> Centers;
+    const int32 Points = Spline->GetNumberOfSplinePoints();
+    for (int32 Index = 0; Index + 1 < Points; ++Index)
+    {
+        const double Start = Spline->GetDistanceAlongSplineAtSplinePoint(Index);
+        const double End = Spline->GetDistanceAlongSplineAtSplinePoint(Index + 1);
+        const bool Straight = Spline->GetSplinePointType(Index) == ESplinePointType::Linear;
+        const int32 Steps = Straight ? 1 : FMath::Max(1, FMath::CeilToInt((End - Start) / 200));
+        for (int32 Step = 0; Step < Steps; ++Step)
+        {
+            const double Distance = FMath::Lerp(Start, End, double(Step) / Steps);
+            const FVector2D Point(Spline->GetLocationAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World));
+            if (Centers.IsEmpty() || !Point.Equals(Centers.Last(), .01)) Centers.Add(Point);
+        }
+    }
+    if (Points < 2) return;
+    const FVector2D End(Spline->GetLocationAtSplinePoint(Points - 1, ESplineCoordinateSpace::World));
+    if (Centers.IsEmpty() || !End.Equals(Centers.Last(), .01)) Centers.Add(End);
+    if (Centers.Num() < 2) return;
+    TArray<FVector2D> Left, Right;
+    for (int32 Index = 0; Index < Centers.Num(); ++Index)
+    {
+        const auto Incoming = (Centers[Index] - Centers[FMath::Max(0, Index - 1)]).GetSafeNormal();
+        const auto Outgoing = (Centers[FMath::Min(Index + 1, Centers.Num() - 1)] - Centers[Index]).GetSafeNormal();
+        auto Tangent = (Incoming + Outgoing).GetSafeNormal();
+        if (Tangent.IsNearlyZero()) Tangent = Outgoing;
+        const FVector2D Side(-Tangent.Y, Tangent.X);
+        const double Miter = FMath::Max(.65, FVector2D::DotProduct(Side, FVector2D(-Outgoing.Y, Outgoing.X)));
+        const FVector2D Offset = Side * (Width * .5 / (Index + 1 == Centers.Num() ? 1. : Miter));
+        Left.Add(Centers[Index] + Offset);
+        Right.Add(Centers[Index] - Offset);
+    }
+    RoadMesh Mesh;
+    const FTransform Transform = Ribbon->GetComponentTransform();
+    for (int32 Index = 0; Index + 1 < Centers.Num(); ++Index)
+        DrapeRoadStrip(Mesh, {Left[Index], Left[Index + 1], Right[Index + 1], Right[Index]},
+            Terrain, Transform, Limit, Lift, GetActorLocation().Z);
+    Ribbon->CreateMeshSection_LinearColor(0, Mesh.Vertices, Mesh.Triangles, Mesh.Normals, Mesh.UVs,
+        TArray<FLinearColor>{}, TArray<FProcMeshTangent>{}, false);
 }
 ADeliveryLevelSettings::ADeliveryLevelSettings()
 { RootComponent=CreateDefaultSubobject<USceneComponent>(TEXT("Root")); }

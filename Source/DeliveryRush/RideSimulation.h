@@ -18,6 +18,11 @@ struct Pickup
     bool available = false;
 };
 using TimePickup = Pickup;
+struct TrafficImpact
+{
+    Vec2 position;
+    double speed = 0;
+};
 struct TrafficRules
 {
     double speed = 0, waveInterval = 0, waveTravel = 0;
@@ -61,6 +66,7 @@ struct Simulation
     double steering = 0, roll = 0, rollVelocity = 0, hitFlash = 0;
     double fallTimer = 0, fallDirection = 1, restartFlash = 0;
     int falls = 0, grazes = 0, attempt = 1;
+    TrafficImpact trafficImpact;
     bool frontWavesEnabled = true;
     int wavesStarted = 0;
     double nextFrontWaveAt = 0, travelAtLastWave = 0, nextWaveCheckAt = 0;

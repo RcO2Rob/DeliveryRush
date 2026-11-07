@@ -371,6 +371,10 @@ int main()
     Require(traffic.cars[0].phase==CarPhase::Wrecked&&traffic.cars[1].phase==CarPhase::Wrecked
         &&traffic.cars[0].crashCause==CrashCause::Car&&traffic.cars[1].crashCause==CrashCause::Car,
         "A heavy head-on collision between enemies can overturn both cars");
+    Require(traffic.trafficImpact.speed>10&&Distance(traffic.trafficImpact.position,{0,-180})<.1,
+        "A car-to-car crash supplies one impact at the collision location");
+    traffic.Tick(1.0/120,{0,0,true});
+    Require(traffic.trafficImpact.speed==0,"The collision sound event clears on the next frame");
     auto slowTraffic=Started();slowTraffic.bike={0,0};slowTraffic.speed=0;
     for(int i=0;i<2;++i)
     {
@@ -378,8 +382,9 @@ int main()
         t.position={i==0?-2.105:2.105,-180};t.heading=i==0?0:Pi;t.speed=2;
         t.waypoint=t.position+Simulation::Forward(t.heading)*50;t.navigationTimer=2;
     }
-    Run(slowTraffic,.05,{0,0,true});
-    Require(slowTraffic.ActiveCars()==2&&slowTraffic.WreckedCars()==0,"A gentle car-to-car bump does not count as an overturn");
+    slowTraffic.Tick(1.0/120,{0,0,true});
+    Require(slowTraffic.ActiveCars()==2&&slowTraffic.WreckedCars()==0&&slowTraffic.trafficImpact.speed>1.5,
+        "A car-to-car bump can play an impact sound without overturning either car");
 
     auto allGone=Started();allGone.bike={0,0};allGone.speed=0;
     for(std::size_t i=0;i<Simulation::InitialCarCount;++i)
@@ -444,14 +449,14 @@ int main()
     Run(campaign,12,{1,0,false});
     Require(campaign.phase==Phase::Delivered,"A new rider can finish the lesson by following the first street");
     campaign.AdvanceStage();
-    Require(campaign.Stage()==CampaignStage::FirstChase&&campaign.phase==Phase::Ready&&campaign.time==90,
+    Require(campaign.Stage()==CampaignStage::FirstChase&&campaign.phase==Phase::Ready&&campaign.time==60,
         "Finishing the lesson unlocks the timed first chase");
     auto retry=campaign;
     retry.Start();
-    Run(retry,91,{0,0,true});
+    Run(retry,61,{0,0,true});
     Require(retry.phase==Phase::Failed,"The first chase has a working deadline");
     retry.Restart();
-    Require(retry.Stage()==CampaignStage::FirstChase&&retry.time==90&&retry.ActiveCars()==0,
+    Require(retry.Stage()==CampaignStage::FirstChase&&retry.time==60&&retry.ActiveCars()==0,
         "A failed chase can be retried without returning to the tutorial");
 
     auto pickupRide=campaign;
@@ -462,13 +467,13 @@ int main()
     pickupRide.bike=pickupRide.timePickups[0].position;
     pickupRide.Tick(.01,{0,0,true});
     Require(!pickupRide.timePickups[0].available&&pickupRide.pickupsCollected==1&&
-        std::abs(pickupRide.time-(90+Simulation::TimePickupBonus-.01))<1e-8,
+        std::abs(pickupRide.time-(60+Simulation::TimePickupBonus-.01))<1e-8,
         "Riding over a clock consumes it and adds ten seconds");
     pickupRide.Tick(.01,{0,0,true});
-    Require(pickupRide.pickupsCollected==1&&pickupRide.time<100,
+    Require(pickupRide.pickupsCollected==1&&pickupRide.time<70,
         "Staying at a collected clock cannot award more time");
     pickupRide.Restart();
-    Require(pickupRide.timePickups[0].available&&pickupRide.pickupsCollected==0&&pickupRide.time==90,
+    Require(pickupRide.timePickups[0].available&&pickupRide.pickupsCollected==0&&pickupRide.time==60,
         "Retrying places fresh clocks and resets the clock bonus");
 
     auto trafficRide=campaign;
@@ -653,7 +658,7 @@ int main()
     orders.bike=firstDrop;
     orders.Tick(.01,{0,0,true});
     Require(orders.phase==Phase::Riding&&orders.deliveriesCompleted==1&&orders.money==100&&
-        Distance(orders.layout->goal,firstDrop)>30&&orders.time>89.9,
+        Distance(orders.layout->goal,firstDrop)>30&&orders.time>59.9&&orders.time<=60,
         "An on-time drop pays once and immediately starts a fresh deadline for the next destination");
     orders.Tick(.01,{0,0,true});
     Require(orders.money==100,"Waiting at the previous destination cannot award another payment");
@@ -662,7 +667,7 @@ int main()
     Require(orders.deliveriesCompleted==1&&orders.money==100&&Distance(orders.bike,firstDrop)<.3,
         "A crash retries from the last delivery checkpoint and retains earned money");
     NoSpawn(orders);
-    Run(orders,91,{0,0,true});
+    Run(orders,61,{0,0,true});
     Require(orders.phase==Phase::Failed&&orders.money==100&&orders.deliveriesCompleted==1,
         "A missed deadline awards no extra money and preserves completed orders");
     orders.Restart();

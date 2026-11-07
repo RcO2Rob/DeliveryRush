@@ -5,7 +5,7 @@ per-order deadline. The campaign has one teaching delivery followed by three
 deliveries in each of stages two and three; the last stop is the clinic.
 Each paid order earns 100 cash and retries preserve completed orders. Traffic
 gets faster and more frequent with each delivery, with a higher simultaneous
-vehicle limit. Stage two allows 90 seconds per order and only one-pass traffic
+vehicle limit. Stage two allows 60 seconds per order and only one-pass traffic
 from ahead. Stage three allows 60 seconds per order and adds rear pursuit.
 Each stage-two order has at most one clock (+10 seconds) and one snowflake;
 stage-three orders have up to two separated alley coins (+10 seconds each)
