@@ -30,11 +30,13 @@ Choose **Quit Game** from the main menu or pause menu to exit.
 
 Install Unreal Engine 5.8 and Python 3. On Windows, add Python to `PATH` and install the Visual Studio **Game development with C++** workload with MSVC x64/x86 tools and a Windows SDK. Visual Studio Installer can import [`.vsconfig`](.vsconfig). On macOS, install and activate the full Xcode toolchain.
 
+Run terminal commands from the repository root.
+
 | Task | Windows | macOS |
 | --- | --- | --- |
-| Check setup | `Check Setup.cmd` | `python3 tools/ue.py doctor` |
-| Open Unreal Editor | `Open Demo.cmd` | `Open Demo.command` |
-| Play in a standalone window | `Play Demo.cmd` | `Play Demo.command` |
+| Check setup | `python -X utf8 tools/ue.py doctor` | `python3 tools/ue.py doctor` |
+| Open Unreal Editor | `python -X utf8 tools/ue.py editor` | `Open Demo.command` |
+| Play in a standalone window | `python -X utf8 tools/ue.py play` | `Play Demo.command` |
 
 For a custom engine location, run `python tools/ue.py editor --engine "<engine-directory>"` on Windows or use `python3` on macOS. To run the standalone C++ simulation checks, use `python tools/check_demo.py`. To package for the current platform, run `python tools/ue.py package`. Packages are written to `Builds/`.
 

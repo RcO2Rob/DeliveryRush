@@ -210,7 +210,7 @@ def main():
         return 0
     if not engine:
         print("Unreal Engine was not found. Install Unreal Engine and the platform toolchain first.\n"
-              "On Windows, see README.md and use Open Demo.cmd after setup.\n"
+              "On Windows, see README.md for setup and launch commands.\n"
               "On Mac, install full Xcode as well. Use Open Demo.command.\n"
               "For a custom engine path: python tools/ue.py editor --engine <engine-directory>", file=sys.stderr)
         return 2
