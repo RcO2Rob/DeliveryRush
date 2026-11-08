@@ -637,12 +637,17 @@ void ADeliveryGameMode::HandleMenuAction(FName Action)
 {
     auto* PC=GetWorld()->GetFirstPlayerController();
     if(!PC||!Rider) return;
-    if(IsShowingMenu())
+    const bool ShowingMenu=IsShowingMenu();
+    if(Action==TEXT("QuitGame")&&(ShowingMenu ? !bMenuRules : Ride.phase==Delivery::Phase::Paused))
+    {
+        UKismetSystemLibrary::QuitGame(this,PC,EQuitPreference::Quit,false);
+        return;
+    }
+    if(ShowingMenu)
     {
         if(Action==TEXT("StartGame")&&!bMenuRules) CloseMainMenu(*PC);
         else if(Action==TEXT("HowToPlay")) bMenuRules=true;
         else if(Action==TEXT("Back")) bMenuRules=false;
-        else if(Action==TEXT("QuitGame")&&!bMenuRules) UKismetSystemLibrary::QuitGame(this,PC,EQuitPreference::Quit,false);
     }
     else if(Action==TEXT("StartRide")&&Ride.phase==Delivery::Phase::Ready)
     {
@@ -673,7 +678,7 @@ void ADeliveryGameMode::AdvanceAfterDelivery(APlayerController& Controller)
 void ADeliveryGameMode::UpdateMouseInput(APlayerController& Controller) const
 {
     Controller.bShowMouseCursor=true;
-    const bool Clickable=Ride.phase==Delivery::Phase::Ready||
+    const bool Clickable=Ride.phase==Delivery::Phase::Ready||Ride.phase==Delivery::Phase::Paused||
         (Ride.phase==Delivery::Phase::Delivered&&Ride.Stage()==Delivery::CampaignStage::ParkCrossing);
     Controller.bEnableClickEvents=Clickable;
     FInputModeGameAndUI Mode;
@@ -797,7 +802,8 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
     const bool WasRiding=Ride.phase==Delivery::Phase::Riding;
     const auto PreviousBridges=Ride.bridgesCrossed;
     if(bStartParkOnArrival&&FApp::HasFocus()) { bStartParkOnArrival=false; Ride.Start(); }
-    if(PC->WasInputKeyJustPressed(EKeys::R)&&Ride.phase!=Delivery::Phase::Ready&&Ride.phase!=Delivery::Phase::Delivered) Ride.Restart();
+    if(PC->WasInputKeyJustPressed(EKeys::R)&&Ride.phase!=Delivery::Phase::Ready&&
+        Ride.phase!=Delivery::Phase::Paused&&Ride.phase!=Delivery::Phase::Delivered) Ride.Restart();
     if(PC->WasInputKeyJustPressed(EKeys::Enter))
     {
         if(Ride.phase==Delivery::Phase::Ready) Ride.Start();
@@ -809,11 +815,8 @@ void ADeliveryGameMode::Tick(float DeltaSeconds)
         }
         else if(Ride.phase==Delivery::Phase::Paused) Ride.TogglePause();
     }
-    if(PC->WasInputKeyJustPressed(EKeys::Escape))
-    {
-        if(Ride.phase==Delivery::Phase::Riding) Ride.TogglePause();
-    }
-    else if(PC->WasInputKeyJustPressed(EKeys::P)) Ride.TogglePause();
+    else if(Ride.phase==Delivery::Phase::Riding&&
+        (PC->WasInputKeyJustPressed(EKeys::Escape)||PC->WasInputKeyJustPressed(EKeys::P))) Ride.TogglePause();
     Delivery::Input Input;
     Input.throttle=(PC->IsInputKeyDown(EKeys::W)||PC->IsInputKeyDown(EKeys::Up)?1:0)
         -(PC->IsInputKeyDown(EKeys::S)||PC->IsInputKeyDown(EKeys::Down)?1:0);
@@ -1159,7 +1162,6 @@ void ADeliveryHUD::DrawHUD()
     }
     Rect(DialogX, DialogY, DialogWidth, DialogHeight, FLinearColor(.02f, .035f, .055f, .97f));
     Rect(DialogX, DialogY, DialogWidth, 5, TimerYellow);
-    FString Prompt;
     if(S.phase==Delivery::Phase::Ready)
     {
         if(!Tutorial) Center(StageTitle(S.Stage()), DialogY + 24, 40, White, true);
@@ -1192,8 +1194,10 @@ void ADeliveryHUD::DrawHUD()
     }
     else if(S.phase==Delivery::Phase::Paused)
     {
-        Center(TEXT("PAUSED"), DialogY + 88, 46, White, true);
-        Prompt = TEXT("ENTER / P TO CONTINUE");
+        Center(TEXT("PAUSED"), DialogY + 64, 46, White, true);
+        Center(TEXT("PRESS ENTER TO CONTINUE"), DialogY + 143, 23, TimerYellow);
+        Button(TEXT("QuitGame"),TEXT("QUIT GAME"),(HudWidth-320)*.5f,DialogY+228,320,49,false);
+        return;
     }
     else if(Delivered)
     {
@@ -1215,11 +1219,8 @@ void ADeliveryHUD::DrawHUD()
         }
         return;
     }
-    else
-    {
-        Center(TEXT("DELIVERY TOO LATE"), DialogY + 88, 43, Red, true);
-        Prompt = MultipleOrders ? TEXT("ENTER / R TO RETRY THIS ORDER") : TEXT("ENTER / R TO RETRY THIS STAGE");
-    }
+    Center(TEXT("DELIVERY TOO LATE"), DialogY + 88, 43, Red, true);
+    const TCHAR* Prompt = MultipleOrders ? TEXT("ENTER / R TO RETRY THIS ORDER") : TEXT("ENTER / R TO RETRY THIS STAGE");
     const float ButtonY = DialogY+252;
     Rect((HudWidth-460)*.5f,ButtonY,460,47,TimerYellow);
     Center(Prompt,ButtonY+9,23,TimerInk);
