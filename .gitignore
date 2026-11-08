@@ -17,6 +17,7 @@ Content/Collections/
 /TimeEcho/
 /docs/
 /Build/Mac/FileOpenOrder/
+/Build/Windows/FileOpenOrder/
 /Build/Mac/*.PackageVersionCounter
 /Content/.delivery_bootstrap.json
 /Content/.delivery_*_bootstrap.json

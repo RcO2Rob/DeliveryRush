@@ -11,7 +11,7 @@ set "launch_result=%errorlevel%"
 if not "%launch_result%"=="0" (
     echo.
     echo Delivery Rush could not start. Read the message above.
-    echo Setup instructions: Windows development guide in the project folder.
+    echo See README.md for setup instructions.
     pause
 ) else if "%~1"=="doctor" (
     pause

@@ -210,7 +210,7 @@ def main():
         return 0
     if not engine:
         print("Unreal Engine was not found. Install Unreal Engine and the platform toolchain first.\n"
-              "On Windows, see Windows开发指南.md; use Open Demo.cmd after setup.\n"
+              "On Windows, see README.md and use Open Demo.cmd after setup.\n"
               "On Mac, install full Xcode as well. Use Open Demo.command.\n"
               "For a custom engine path: python tools/ue.py editor --engine <engine-directory>", file=sys.stderr)
         return 2
@@ -221,7 +221,7 @@ def main():
         return 2
     if sys.platform == "win32" and not status["windows_toolchain"]["available"]:
         print("Windows C++ toolchain is incomplete. In Visual Studio Installer, add Game development with C++,\n"
-              "MSVC x64/x86 build tools and a Windows SDK. See Windows开发指南.md.", file=sys.stderr)
+              "MSVC x64/x86 build tools and a Windows SDK. See README.md.", file=sys.stderr)
         return 2
     if sys.platform == "darwin" and not status["xcode_available"]:
         print("A full active Xcode installation is required. Current xcodebuild check failed:\n" + status["xcode"], file=sys.stderr)
